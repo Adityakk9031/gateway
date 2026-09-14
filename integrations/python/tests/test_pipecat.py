@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from unittest.mock import AsyncMock, patch
 
+from pipecat.adapters.schemas.function_schema import FunctionSchema
 from pipecat.frames.frames import (
     InterimTranscriptionFrame,
     TranscriptionFrame,
@@ -11,7 +12,9 @@ from pipecat.frames.frames import (
     TTSStoppedFrame,
     VADUserStoppedSpeakingFrame,
 )
+from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.frame_processor import FrameDirection
+from pipecat.services.settings import LLMSettings
 from pipecat.services.stt_service import STTService as PipecatSTTService
 
 from speko_gateway.client import (
@@ -21,10 +24,26 @@ from speko_gateway.client import (
     SessionConfig,
 )
 from speko_gateway.pipecat import (
+    SpekoLLMService,
     SpekoSTTService,
     SpekoTTSService,
     _transcription_frame,
 )
+
+
+class FakeRelayClient:
+    def __init__(self, events: list[tuple[str, dict]] | None = None) -> None:
+        self.events = events or []
+        self.requests: list[dict] = []
+        self.closed = False
+
+    async def stream_response(self, request: dict):
+        self.requests.append(request)
+        for event in self.events:
+            yield event
+
+    async def aclose(self) -> None:
+        self.closed = True
 
 
 class FakeGatewaySession:
@@ -173,7 +192,149 @@ def test_transcription_events_map_to_native_pipecat_frames() -> None:
     assert final.result == {
         "provider_request_id": "req-1",
         "extensions": {"deepgram": {"words": []}},
+        "language": "en",
     }
+
+
+def test_transcription_uses_detected_language_when_gateway_supplies_it() -> None:
+    frame = _transcription_frame(
+        CanonicalEvent(
+            type="transcript.final",
+            data={"text": "Salom", "language": "uz"},
+        ),
+        user_id="caller",
+        language="en",
+    )
+    assert isinstance(frame, TranscriptionFrame)
+    assert frame.language is not None and frame.language.value == "uz"
+    assert frame.result["language"] == "uz"
+
+
+def test_llm_request_maps_universal_messages_and_full_tool_schema() -> None:
+    async def handler(_params) -> None:
+        return None
+
+    tool = FunctionSchema(
+        name="book_slot",
+        description="Book a slot",
+        properties={
+            "day": {"type": "string", "enum": ["monday", "tuesday"]},
+            "count": {"type": "integer", "minimum": 1},
+        },
+        required=["day"],
+        handler=handler,
+    )
+    context = LLMContext(
+        messages=[
+            {"role": "developer", "content": "Be concise"},
+            {"role": "user", "content": "Book Monday"},
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "book_slot", "arguments": '{"day":"monday"}'},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call-1", "content": "confirmed"},
+        ],
+        tools=[tool],
+    )
+    llm = SpekoLLMService(FakeRelayClient(), system_instruction="Base prompt")  # type: ignore[arg-type]
+
+    request = llm._request(context)
+
+    assert request["routing"] == {"mode": "auto", "objective": "balanced"}
+    assert request["input"] == [
+        {
+            "type": "message",
+            "role": "system",
+            "content": [{"type": "text", "text": "Base prompt"}],
+        },
+        {
+            "type": "message",
+            "role": "system",
+            "content": [{"type": "text", "text": "Be concise"}],
+        },
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "text", "text": "Book Monday"}],
+        },
+        {
+            "type": "function_call",
+            "call_id": "call-1",
+            "name": "book_slot",
+            "arguments": '{"day":"monday"}',
+        },
+        {"type": "function_result", "call_id": "call-1", "result": "confirmed"},
+    ]
+    assert request["tools"] == [
+        {
+            "name": "book_slot",
+            "description": "Book a slot",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "day": {"type": "string", "enum": ["monday", "tuesday"]},
+                    "count": {"type": "integer", "minimum": 1},
+                },
+                "required": ["day"],
+            },
+        }
+    ]
+
+
+async def test_llm_run_inference_collects_streamed_text() -> None:
+    relay = FakeRelayClient(
+        [
+            ("response.created", {"response_id": "response-1"}),
+            ("response.text.delta", {"delta": "CONVER"}),
+            ("response.text.delta", {"delta": "SATION"}),
+            ("response.completed", {"usage": {"input_tokens": 2, "output_tokens": 1}}),
+        ]
+    )
+    llm = SpekoLLMService(relay)  # type: ignore[arg-type]
+
+    result = await llm.run_inference(
+        LLMContext(messages=[{"role": "user", "content": "Classify"}]),
+        max_tokens=4,
+        system_instruction="Return one word",
+    )
+
+    assert result == "CONVERSATION"
+    assert relay.requests[0]["max_output_tokens"] == 4
+    assert relay.requests[0]["input"][0]["content"][0]["text"] == "Return one word"
+
+
+async def test_llm_typed_settings_updates_change_router_request() -> None:
+    llm = SpekoLLMService(  # type: ignore[arg-type]
+        FakeRelayClient(),
+        provider="openai",
+        model="gpt-default",
+        max_output_tokens=100,
+    )
+    await llm._update_settings(
+        LLMSettings(
+            model="gpt-node",
+            temperature=0.2,
+            top_p=0.8,
+            max_tokens=321,
+        )
+    )
+
+    request = llm._request(LLMContext(messages=[{"role": "user", "content": "Hi"}]))
+
+    assert request["routing"] == {
+        "mode": "explicit",
+        "provider": "openai",
+        "model": "gpt-node",
+    }
+    assert request["max_output_tokens"] == 321
+    assert request["temperature"] == 0.2
+    assert request["top_p"] == 0.8
 
 
 async def test_stt_streams_audio_and_commits_before_vad_stop() -> None:

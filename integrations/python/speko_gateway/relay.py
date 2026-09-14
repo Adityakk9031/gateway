@@ -44,7 +44,13 @@ class RelayError(RuntimeError):
 class RelayLLMClient:
     """Own one authenticated HTTPS transport to the hosted Speko Router."""
 
-    def __init__(self, *, api_key: str, base_url: str = _DEFAULT_RELAY_URL) -> None:
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        base_url: str = _DEFAULT_RELAY_URL,
+        session_id: str = "",
+    ) -> None:
         if not api_key:
             raise ValueError("api_key is required")
         self._base_url = base_url.rstrip("/")
@@ -55,9 +61,10 @@ class RelayLLMClient:
             },
             raise_for_status=False,
         )
+        self._platform_session_id = session_id
 
     @classmethod
-    def from_env(cls) -> RelayLLMClient:
+    def from_env(cls, *, session_id: str = "") -> RelayLLMClient:
         """Create a client from SPEKO_API_KEY and optional SPEKO_ROUTER_URL.
 
         SPEKO_RELAY_URL remains a compatibility fallback for existing
@@ -72,7 +79,7 @@ class RelayLLMClient:
             or os.environ.get("SPEKO_RELAY_URL", "").strip()
             or _DEFAULT_RELAY_URL
         )
-        return cls(api_key=api_key, base_url=base_url)
+        return cls(api_key=api_key, base_url=base_url, session_id=session_id)
 
     async def aclose(self) -> None:
         await self._session.close()
@@ -93,6 +100,8 @@ class RelayLLMClient:
             "Idempotency-Key": str(uuid.uuid4()),
             "Accept": "text/event-stream",
         }
+        if self._platform_session_id:
+            headers["Speko-Client-Session-ID"] = self._platform_session_id
         async with self._session.post(
             f"{self._base_url}/v1/llm/responses", json=body, headers=headers
         ) as response:
