@@ -508,6 +508,20 @@ class SpekoLLMService(LLMService):
     def can_generate_metrics(self) -> bool:
         return True
 
+    async def _update_settings(self, delta: LLMSettings) -> dict[str, Any]:
+        if is_given(delta.model):
+            model = delta.model
+            if not isinstance(model, str) or not model:
+                raise ValueError("model must be a non-empty string")
+            if (self._provider == "auto") != (model == "auto"):
+                raise ValueError(
+                    "runtime model updates cannot change between auto and explicit routing"
+                )
+        changed = await super()._update_settings(delta)
+        if "model" in changed:
+            self._model = self._settings.model
+        return changed
+
     async def cleanup(self) -> None:
         if self._owns_client:
             await self._client.aclose()

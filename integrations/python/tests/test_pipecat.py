@@ -337,6 +337,24 @@ async def test_llm_typed_settings_updates_change_router_request() -> None:
     assert request["top_p"] == 0.8
 
 
+async def test_llm_settings_cannot_change_auto_route_mode() -> None:
+    auto = SpekoLLMService(FakeRelayClient())  # type: ignore[arg-type]
+    explicit = SpekoLLMService(  # type: ignore[arg-type]
+        FakeRelayClient(), provider="openai", model="gpt-default"
+    )
+
+    for service, model in ((auto, "gpt-node"), (explicit, "auto")):
+        try:
+            await service._update_settings(LLMSettings(model=model))
+        except ValueError as error:
+            assert "cannot change between auto and explicit routing" in str(error)
+        else:
+            raise AssertionError("expected route-mode update to be rejected")
+
+    assert auto._settings.model == "auto"
+    assert explicit._settings.model == "gpt-default"
+
+
 async def test_stt_streams_audio_and_commits_before_vad_stop() -> None:
     session = FakeGatewaySession()
     client = FakeGatewayClient(session)
