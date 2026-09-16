@@ -399,7 +399,7 @@ func TestSTTCommitAudioEmitsAnEmptyFinalForSilence(t *testing.T) {
 	assertTranscript(t, events[0].Data, "", true)
 }
 
-func TestSTTCloseAfterCommitSendsOnlyTheEmptyEndFrame(t *testing.T) {
+func TestSTTCloseAfterCommitWaitsForFinishedUsage(t *testing.T) {
 	t.Parallel()
 
 	server := newSTTServer(t, func(ctx context.Context, conn *websocket.Conn) {
@@ -420,6 +420,12 @@ func TestSTTCloseAfterCommitSendsOnlyTheEmptyEndFrame(t *testing.T) {
 			"tokens": []any{map[string]any{"text": "<fin>", "is_final": true}},
 		}); err != nil {
 			t.Errorf("write fin: %v", err)
+			return
+		}
+		if err := writeJSONFrame(ctx, conn, map[string]any{
+			"tokens": []any{}, "finished": true, "total_audio_proc_ms": 1_680,
+		}); err != nil {
+			t.Errorf("write finished: %v", err)
 		}
 	})
 	defer server.Close()
@@ -439,8 +445,15 @@ func TestSTTCloseAfterCommitSendsOnlyTheEmptyEndFrame(t *testing.T) {
 	if err := stream.Close(context.Background()); err != nil {
 		t.Fatalf("close stream: %v", err)
 	}
-	if events := collectEvents(t, stream.Events(), 1); events[0].Type != protocol.EventTranscriptFinal {
-		t.Fatalf("event = %q, want transcript.final", events[0].Type)
+	events := collectEvents(t, stream.Events(), 2)
+	if got := strings.Join(eventTypeNames(events), ","); got != "transcript.final,usage.observed" {
+		t.Fatalf("event types = %s", got)
+	}
+	var usage struct {
+		AudioProcessedMS int64 `json:"audio_processed_ms"`
+	}
+	if err := json.Unmarshal(events[1].Data, &usage); err != nil || usage.AudioProcessedMS != 1_680 {
+		t.Fatalf("usage = %+v, err=%v", usage, err)
 	}
 	select {
 	case _, ok := <-stream.Events():
@@ -449,6 +462,126 @@ func TestSTTCloseAfterCommitSendsOnlyTheEmptyEndFrame(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("events did not close after the committed final")
+	}
+}
+
+func TestSTTCloseHandlesFinishedBeforeTheEndFrame(t *testing.T) {
+	t.Parallel()
+
+	server := newSTTServer(t, func(ctx context.Context, conn *websocket.Conn) {
+		if _, err := readJSONObject(ctx, conn); err != nil {
+			t.Errorf("read start request: %v", err)
+			return
+		}
+		if control, err := readJSONObject(ctx, conn); err != nil || control["type"] != "finalize" {
+			t.Errorf("read explicit finalize: %v, frame=%v", err, control)
+			return
+		}
+		if err := writeJSONFrame(ctx, conn, map[string]any{
+			"tokens": []any{map[string]any{"text": "yes", "is_final": true}, map[string]any{"text": "<fin>", "is_final": true}},
+		}); err != nil {
+			t.Errorf("write fin: %v", err)
+			return
+		}
+		if err := writeJSONFrame(ctx, conn, map[string]any{
+			"tokens": []any{}, "finished": true, "total_audio_proc_ms": 1_680,
+		}); err != nil {
+			t.Errorf("write finished: %v", err)
+			return
+		}
+		messageType, payload, err := conn.Read(ctx)
+		if err != nil || messageType != websocket.MessageBinary || len(payload) != 0 {
+			t.Errorf("close frame = (%v, %q, %v), want empty binary", messageType, payload, err)
+			return
+		}
+		waitForPeer(ctx, conn)
+	})
+	defer server.Close()
+
+	adapter, err := NewSTT(sttTestConfig(server.URL))
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+	stream, err := adapter.Open(context.Background(), sttAdapterRequest(server.URL))
+	if err != nil {
+		t.Fatalf("open stream: %v", err)
+	}
+	defer abortStream(stream)
+	stream.(*sttStream).closeTimeout = 20 * time.Millisecond
+	if err := stream.CommitAudio(context.Background()); err != nil {
+		t.Fatalf("commit audio: %v", err)
+	}
+	if events := collectEvents(t, stream.Events(), 2); strings.Join(eventTypeNames(events), ",") != "transcript.final,usage.observed" {
+		t.Fatalf("event types = %s", strings.Join(eventTypeNames(events), ","))
+	}
+	if err := stream.Close(context.Background()); err != nil {
+		t.Fatalf("close stream: %v", err)
+	}
+	select {
+	case event, ok := <-stream.Events():
+		if ok {
+			t.Fatalf("unexpected event after successful close: %#v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("events did not close after an early finished frame")
+	}
+	if terminal := stream.(runtimepkg.TerminalErrorProviderStream).TerminalError(); terminal != nil {
+		t.Fatalf("terminal error = %v, want nil", terminal)
+	}
+}
+
+func TestSTTCloseTimesOutWhenFinishedNeverArrives(t *testing.T) {
+	t.Parallel()
+
+	server := newSTTServer(t, func(ctx context.Context, conn *websocket.Conn) {
+		if _, err := readJSONObject(ctx, conn); err != nil {
+			t.Errorf("read start request: %v", err)
+			return
+		}
+		if control, err := readJSONObject(ctx, conn); err != nil || control["type"] != "finalize" {
+			t.Errorf("read explicit finalize: %v, frame=%v", err, control)
+			return
+		}
+		messageType, payload, err := conn.Read(ctx)
+		if err != nil || messageType != websocket.MessageBinary || len(payload) != 0 {
+			t.Errorf("close frame = (%v, %q, %v), want empty binary", messageType, payload, err)
+			return
+		}
+		waitForPeer(ctx, conn)
+	})
+	defer server.Close()
+
+	adapter, err := NewSTT(sttTestConfig(server.URL))
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+	stream, err := adapter.Open(context.Background(), sttAdapterRequest(server.URL))
+	if err != nil {
+		t.Fatalf("open stream: %v", err)
+	}
+	defer abortStream(stream)
+	stream.(*sttStream).closeTimeout = 20 * time.Millisecond
+	if err := stream.CommitAudio(context.Background()); err != nil {
+		t.Fatalf("commit audio: %v", err)
+	}
+	if err := stream.Close(context.Background()); err != nil {
+		t.Fatalf("close stream: %v", err)
+	}
+	providerErr := awaitProviderError(t, stream.Events())
+	if providerErr.Code != "request_timeout" || !providerErr.Retryable {
+		t.Fatalf("close timeout error = %#v", providerErr)
+	}
+	select {
+	case _, ok := <-stream.Events():
+		if ok {
+			t.Fatal("events remained open after the graceful-close timeout")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("events did not close after the graceful-close timeout")
+	}
+	terminal := stream.(runtimepkg.TerminalErrorProviderStream).TerminalError()
+	if !errors.As(terminal, &providerErr) || providerErr.Code != "request_timeout" {
+		t.Fatalf("terminal error = %v, want request_timeout", terminal)
 	}
 }
 

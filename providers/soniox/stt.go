@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/SpekoAI/gateway/internal/upstream"
 	"github.com/SpekoAI/gateway/protocol"
@@ -34,6 +35,13 @@ const (
 	// Soniox records client_reference_id in usage logs and rejects anything
 	// longer with HTTP 400.
 	sttMaxClientReferenceCharacters = 256
+	sttGracefulCloseTimeout         = 30 * time.Second
+)
+
+const (
+	sttClosePending uint32 = iota
+	sttCloseFinished
+	sttCloseTimedOut
 )
 
 // STTConfig controls local transport limits. Credentials and provider
@@ -181,10 +189,11 @@ func (a *STTAdapter) Open(ctx context.Context, request runtimepkg.AdapterRequest
 
 	streamCtx, cancel := context.WithCancel(context.Background())
 	stream := &sttStream{
-		conn:   conn,
-		ctx:    streamCtx,
-		cancel: cancel,
-		events: make(chan runtimepkg.ProviderEvent, a.eventBuffer),
+		conn:         conn,
+		ctx:          streamCtx,
+		cancel:       cancel,
+		events:       make(chan runtimepkg.ProviderEvent, a.eventBuffer),
+		closeTimeout: sttGracefulCloseTimeout,
 	}
 	go stream.readLoop()
 	return stream, nil
@@ -295,6 +304,11 @@ type sttStream struct {
 	abortOnce    sync.Once
 	closed       atomic.Bool
 	closeErr     error
+	closeTimeout time.Duration
+	closeState   atomic.Uint32
+	finishedSeen atomic.Bool
+	terminalMu   sync.RWMutex
+	terminalErr  error
 
 	// Read-loop owned; never touched by the write side.
 	segment   sttSegment
@@ -307,7 +321,6 @@ type sttStream struct {
 	// binary frame as end-of-stream, so only uncommitted audio needs a finalize
 	// immediately before it.
 	finalizeSent atomic.Bool
-	finalSeen    atomic.Bool
 }
 
 func (s *sttStream) Events() <-chan runtimepkg.ProviderEvent { return s.events }
@@ -381,10 +394,13 @@ func (s *sttStream) Close(ctx context.Context) error {
 		}
 		s.closed.Store(true)
 		s.writeMu.Unlock()
-		if s.closeErr == nil && s.finalSeen.Load() {
-			s.cancel()
-		}
-		if s.closeErr != nil {
+		if s.closeErr == nil {
+			if s.finishedSeen.Load() {
+				s.completeGracefulClose()
+			} else {
+				go s.finishGracefulClose()
+			}
+		} else {
 			_ = s.abort()
 		}
 	})
@@ -400,6 +416,54 @@ func (s *sttStream) abort() error {
 		}
 	})
 	return s.closeErr
+}
+
+func (s *sttStream) finishGracefulClose() {
+	timeout := s.closeTimeout
+	if timeout <= 0 {
+		timeout = sttGracefulCloseTimeout
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		if !s.closeState.CompareAndSwap(sttClosePending, sttCloseTimedOut) {
+			return
+		}
+		s.setTerminal(sttCloseTimeoutError())
+		s.cancel()
+	case <-s.ctx.Done():
+	}
+}
+
+func (s *sttStream) completeGracefulClose() {
+	s.closeState.CompareAndSwap(sttClosePending, sttCloseFinished)
+	if s.closeState.Load() == sttCloseFinished {
+		s.cancel()
+	}
+}
+
+func sttCloseTimeoutError() error {
+	return &runtimepkg.ProviderError{
+		Code:      "request_timeout",
+		Message:   "Soniox STT did not finish graceful shutdown before the timeout",
+		Hint:      "Retry the request; if it recurs, route to another STT provider.",
+		Retryable: true,
+	}
+}
+
+func (s *sttStream) TerminalError() error {
+	s.terminalMu.RLock()
+	defer s.terminalMu.RUnlock()
+	return s.terminalErr
+}
+
+func (s *sttStream) setTerminal(err error) {
+	s.terminalMu.Lock()
+	defer s.terminalMu.Unlock()
+	if s.terminalErr == nil {
+		s.terminalErr = err
+	}
 }
 
 func (s *sttStream) writeJSON(ctx context.Context, value any) error {
@@ -439,7 +503,15 @@ func sttWriteControl(ctx context.Context, conn *websocket.Conn, value any) error
 }
 
 func (s *sttStream) readLoop() {
-	defer close(s.events)
+	defer func() {
+		if s.closeState.Load() == sttCloseTimedOut {
+			select {
+			case s.events <- runtimepkg.ProviderEvent{Err: s.TerminalError()}:
+			default:
+			}
+		}
+		close(s.events)
+	}()
 	for {
 		messageType, payload, err := s.conn.Read(s.ctx)
 		if err != nil {
@@ -505,6 +577,9 @@ func (s *sttStream) handleMessage(payload []byte) error {
 	}
 
 	if message.Finished {
+		if s.closed.Load() && !s.closeState.CompareAndSwap(sttClosePending, sttCloseFinished) && s.closeState.Load() == sttCloseTimedOut {
+			return s.TerminalError()
+		}
 		// The socket is about to close. Flush whatever the endpointer never
 		// got round to marking, then report the provider's own measure of
 		// processed audio, which is the unit an STT reservation is priced in.
@@ -512,11 +587,18 @@ func (s *sttStream) handleMessage(payload []byte) error {
 			return err
 		}
 		processed := message.TotalAudioProcMS
-		return s.emit(runtimepkg.ProviderEvent{
+		if err := s.emit(runtimepkg.ProviderEvent{
 			Type:       protocol.EventUsageObserved,
 			Data:       sonioxUsageData(s.requestID, &processed),
 			Extensions: sttExtension(raw),
-		})
+		}); err != nil {
+			return err
+		}
+		s.finishedSeen.Store(true)
+		if s.closed.Load() {
+			s.completeGracefulClose()
+		}
+		return nil
 	}
 	return nil
 }
@@ -537,9 +619,6 @@ func (s *sttStream) handleTokens(message sttInboundMessage, raw json.RawMessage)
 			}
 			if token.Text == finToken {
 				committed := s.commitPending.Swap(false)
-				if committed {
-					s.finalSeen.Store(true)
-				}
 				if emptySegment && committed {
 					if err := s.emit(runtimepkg.ProviderEvent{
 						Type:       protocol.EventTranscriptFinal,
@@ -548,9 +627,6 @@ func (s *sttStream) handleTokens(message sttInboundMessage, raw json.RawMessage)
 					}); err != nil {
 						return err
 					}
-				}
-				if committed && s.closed.Load() {
-					s.cancel()
 				}
 			}
 			// A provisional tail cannot outlive the boundary that closed its
