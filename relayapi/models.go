@@ -185,11 +185,13 @@ type Model struct {
 	OutputAudioFormats []AudioFormat     `json:"output_audio_formats,omitempty"`
 	BatchAudioLimits   *BatchAudioLimits `json:"batch_audio_limits,omitempty"`
 	// Endpoint is the public Router route an S2S model is served on
-	// (/v1/realtime or /v1/live); omitted for every other kind, whose routes
-	// are fixed per kind.
+	// (/v1/realtime, /v1/live, or /v1/bidi); omitted for every other kind,
+	// whose routes are fixed per kind.
 	Endpoint string `json:"endpoint,omitempty"`
 	// Protocol names the native event protocol an S2S route speaks
-	// (openai.realtime.v1, openai.live.v1); omitted for every other kind.
+	// (openai.realtime.v1, openai.live.v1, google.live.v1); omitted for every
+	// other kind. It also tells a client how to FRAME its messages: the two
+	// OpenAI protocols tag by "type", google.live.v1 by top-level key.
 	Protocol  string          `json:"protocol,omitempty"`
 	Benchmark *ModelBenchmark `json:"benchmark,omitempty"`
 }
@@ -225,8 +227,8 @@ func (m Model) Validate() error {
 		if len(m.OutputAudioFormats) == 0 {
 			return fmt.Errorf("output_audio_formats: at least one format is required for s2s models")
 		}
-		if m.Endpoint != RealtimeRoutePath && m.Endpoint != LiveRoutePath {
-			return fmt.Errorf("endpoint: s2s models are served on %s or %s, got %q", RealtimeRoutePath, LiveRoutePath, m.Endpoint)
+		if m.Endpoint != RealtimeRoutePath && m.Endpoint != LiveRoutePath && m.Endpoint != BidiRoutePath {
+			return fmt.Errorf("endpoint: s2s models are served on %s, %s or %s, got %q", RealtimeRoutePath, LiveRoutePath, BidiRoutePath, m.Endpoint)
 		}
 		if strings.TrimSpace(m.Protocol) == "" || strings.ContainsAny(m.Protocol, " \t\r\n") {
 			return fmt.Errorf("protocol: required for s2s models")

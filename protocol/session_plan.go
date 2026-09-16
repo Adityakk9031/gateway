@@ -3,6 +3,7 @@ package protocol
 import (
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"strings"
@@ -206,6 +207,37 @@ type S2SOptions struct {
 	// speech-to-speech protocol; a Live adapter treats nil as client
 	// delegation with no history.
 	Live *LiveOptions `json:"live,omitempty"`
+	// Bidi carries the Gemini-Live-only configuration. Nil on every other
+	// speech-to-speech protocol, and nil on a Gemini session the Router
+	// composed itself (the provider-direct path), where the adapter builds a
+	// setup document from Instructions, Voice and Temperature as before.
+	Bidi *BidiOptions `json:"bidi,omitempty"`
+}
+
+// BidiOptions carries the caller's own Gemini Live setup document from the
+// public /v1/bidi socket through to the adapter.
+//
+// It exists because that route is native passthrough: the caller wrote a
+// vendor setup object, the Router validated and bounded it, and the adapter
+// must send THAT — not one re-derived from a handful of extracted fields,
+// which would silently drop every vendor setting the Router had just
+// accepted. The model is not taken from here: the adapter pins the admitted
+// one, so a setup naming another model cannot move the session.
+type BidiOptions struct {
+	// Setup is the validated `setup` object (the inner document, without its
+	// wrapping key), forwarded verbatim apart from the pinned model.
+	Setup json.RawMessage `json:"setup,omitempty"`
+}
+
+// Validate bounds the forwarded setup document.
+func (o BidiOptions) Validate() error {
+	if len(o.Setup) > MaxBidiSetupBytes {
+		return fmt.Errorf("setup: at most %d bytes", MaxBidiSetupBytes)
+	}
+	if len(o.Setup) > 0 && !isJSONObject(o.Setup) {
+		return fmt.Errorf("setup: must be a JSON object")
+	}
+	return nil
 }
 
 // UsageUnit identifies the provider quantity whose spend was authorized by a
@@ -470,6 +502,11 @@ func (o S2SOptions) validate() error {
 	if o.Live != nil {
 		if err := o.Live.Validate(); err != nil {
 			return fmt.Errorf("live: %w", err)
+		}
+	}
+	if o.Bidi != nil {
+		if err := o.Bidi.Validate(); err != nil {
+			return fmt.Errorf("bidi: %w", err)
 		}
 	}
 	return nil

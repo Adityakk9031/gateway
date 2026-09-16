@@ -2,18 +2,23 @@ package relayapi
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"unicode/utf8"
 )
 
-// Public speech-to-speech routes. Both sockets speak the vendor's NATIVE JSON
+// Public speech-to-speech routes. Every socket speaks the vendor's NATIVE JSON
 // event protocol: the Router authenticates, admits, meters, and forwards, but
 // it does not translate events. What the Router adds is bounded: it pins the
 // model and audio format an admitted session may use, refuses commands that
-// belong to the other protocol, and emits its own typed error frame (the
+// belong to another protocol, and emits its own typed error frame (the
 // ErrorEvent shape shared with every streaming route) when the relay — not
 // the vendor — ends a session.
+//
+// Gemini Live's route and framing live in bidi.go: it is the one protocol here
+// whose frames are keyed by their top-level field instead of a "type" tag.
 const (
 	// RealtimeRoutePath serves the OpenAI Realtime protocol. The model is an
 	// exact query parameter: GET /v1/realtime?model=gpt-realtime-2.1. The
@@ -143,7 +148,9 @@ func DecodeLiveSessionStart(raw []byte) (LiveSessionStart, error) {
 	if err := decoder.Decode(&start); err != nil {
 		return LiveSessionStart{}, fmt.Errorf("session.start is not a valid frame: %w", err)
 	}
-	if decoder.More() {
+	// Decoder.More reports false at a stray closing delimiter, so it cannot
+	// prove the frame was consumed: only a second decode that hits EOF can.
+	if err := decoder.Decode(new(json.RawMessage)); !errors.Is(err, io.EOF) {
 		return LiveSessionStart{}, fmt.Errorf("session.start frame carries trailing content")
 	}
 	return start, nil
@@ -399,4 +406,9 @@ func (c LiveResponsesConfig) ToolTypes() []string {
 
 func isJSONObject(raw json.RawMessage) bool {
 	return json.Valid(raw) && strings.HasPrefix(strings.TrimSpace(string(raw)), "{")
+}
+
+func isJSONArray(raw json.RawMessage) bool {
+	trimmed := strings.TrimSpace(string(raw))
+	return strings.HasPrefix(trimmed, "[") && json.Valid(raw)
 }

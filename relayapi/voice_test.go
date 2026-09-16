@@ -112,3 +112,17 @@ func TestLiveSessionStartRefusesUnknownFieldsAndTrailingContent(t *testing.T) {
 		t.Fatal("trailing content must be refused")
 	}
 }
+
+func TestLiveSessionStartRefusesTrailingDelimiters(t *testing.T) {
+	t.Parallel()
+	// Same hole as the bidi decoder had: Decoder.More is false at a stray
+	// closing delimiter, so the frame must be proven consumed by reaching EOF.
+	for _, frame := range []string{
+		`{"type":"session.start","session":{"model":"gpt-live-1"}}}`,
+		`{"type":"session.start","session":{"model":"gpt-live-1"}}]`,
+	} {
+		if _, err := relayapi.DecodeLiveSessionStart([]byte(frame)); err == nil {
+			t.Fatalf("%s must be refused", frame)
+		}
+	}
+}

@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/SpekoAI/gateway/protocol"
 	"github.com/SpekoAI/gateway/relayapi"
 )
 
@@ -224,6 +225,112 @@ func TestWSMessageSamplesMatchAsyncAPISchemas(t *testing.T) {
 			}
 		}
 	}
+
+	// Gemini Live is keyed by its single top-level field, so the type-tag loop
+	// above cannot classify it. Same contract, different tag: every frame in
+	// the fixture must match the schema its key names, and every Router-defined
+	// key must appear at least once.
+	bidiSchemaByKey := map[string]string{
+		relayapi.BidiSetupKey:         "BidiSetup",
+		relayapi.BidiRealtimeInputKey: "BidiAudioChunk",
+	}
+	var bidiFrames []json.RawMessage
+	decodeFixture(t, "ws-bidi-messages.json", &bidiFrames)
+	seenKeys := make(map[string]bool, len(bidiFrames))
+	for i, frame := range bidiFrames {
+		key, ok := relayapi.BidiMessageKey(frame)
+		if !ok {
+			t.Fatalf("ws-bidi-messages.json[%d]: frame carries no single top-level key", i)
+		}
+		seenKeys[key] = true
+		schema, defined := bidiSchemaByKey[key]
+		if !defined {
+			// clientContent and toolResponse are forwarded verbatim; their
+			// insides belong to the vendor, but the published channel still
+			// promises the key-tagged envelope, so they are held to it.
+			if !protocol.BidiControlAllowed(key) {
+				t.Fatalf("ws-bidi-messages.json[%d]: key %q is neither Router-defined nor forwardable", i, key)
+			}
+			schema = "BidiClientEvent"
+		}
+		doc.validateAgainst(t, schema, frame, "ws-bidi-messages.json["+strconv.Itoa(i)+"]")
+	}
+	for key := range bidiSchemaByKey {
+		if !seenKeys[key] {
+			t.Fatalf("ws-bidi-messages.json: fixture must exercise every Router-defined key, missing %q", key)
+		}
+	}
+	for _, key := range protocol.BidiControlKeys() {
+		if !seenKeys[key] {
+			t.Fatalf("ws-bidi-messages.json: fixture must exercise forwardable key %q", key)
+		}
+	}
+	// Every client fixture frame must match EXACTLY ONE of the channel's
+	// published alternatives: a generic envelope that also accepted setup or
+	// realtimeInput would break consumers enforcing the oneOf contract on
+	// frames the Router itself sends. The per-key checks above pick a schema
+	// first, so they cannot see that overlap; this walks the channel instead.
+	alternatives, _ := specNode(t, doc, "channels", relayapi.BidiRoutePath, "publish", "message", "oneOf").([]any)
+	if len(alternatives) < 3 {
+		t.Fatalf("%s publish.message.oneOf = %v, want the three client alternatives", relayapi.BidiRoutePath, alternatives)
+	}
+	for i, frame := range bidiFrames {
+		var value any
+		if err := json.Unmarshal(frame, &value); err != nil {
+			t.Fatalf("ws-bidi-messages.json[%d]: %v", i, err)
+		}
+		matched := 0
+		for _, alternative := range alternatives {
+			message, err := doc.resolve(alternative.(map[string]any)["$ref"].(string))
+			if err != nil {
+				t.Fatalf("%s: %v", relayapi.BidiRoutePath, err)
+			}
+			if doc.validate(message["payload"].(map[string]any), value, "bidi client alternative") == nil {
+				matched++
+			}
+		}
+		if matched != 1 {
+			t.Fatalf("ws-bidi-messages.json[%d]: matches %d published client alternatives, want exactly one: %s", i, matched, frame)
+		}
+	}
+	// The envelope bounds are load-bearing, so the validator must enforce
+	// them: an empty object, two keys, or a key the Router owns must all fail
+	// the client envelope, and an empty object must fail the server one.
+	for _, tc := range []struct{ schema, frame string }{
+		{"BidiClientEvent", `{}`},
+		{"BidiClientEvent", `{"clientContent":{},"toolResponse":{}}`},
+		{"BidiClientEvent", `{"setup":{"model":"gemini-3.8-live"}}`},
+		{"BidiClientEvent", `{"realtimeInput":{"audioStreamEnd":true}}`},
+		{"BidiClientEvent", `{"clientContent":"turn"}`},
+		{"BidiServerEvent", `{}`},
+	} {
+		var value any
+		if err := json.Unmarshal([]byte(tc.frame), &value); err != nil {
+			t.Fatal(err)
+		}
+		if doc.validate(doc.schema(t, tc.schema), value, tc.schema) == nil {
+			t.Fatalf("%s must refuse %s", tc.schema, tc.frame)
+		}
+	}
+	// The server side has no fixture file: the frames are the vendor's, so a
+	// representative set (including the usageMetadata sibling) is held to the
+	// published envelope here, and the type-tagged schema must NOT accept them
+	// — that is the mistake this schema exists to prevent.
+	for i, frame := range []string{
+		`{"setupComplete":{}}`,
+		`{"serverContent":{"modelTurn":{"parts":[{"inlineData":{"mimeType":"audio/pcm;rate=24000","data":"AAAA"}}]}},"usageMetadata":{"promptTokenCount":2,"responseTokenCount":3}}`,
+		`{"toolCall":{"functionCalls":[{"id":"call_1","name":"lookup_order","args":{}}]}}`,
+		`{"goAway":{"timeLeft":"10s"}}`,
+	} {
+		doc.validateAgainst(t, "BidiServerEvent", json.RawMessage(frame), "bidi server frame "+strconv.Itoa(i))
+		var value any
+		if err := json.Unmarshal([]byte(frame), &value); err != nil {
+			t.Fatalf("bidi server frame %d: %v", i, err)
+		}
+		if doc.validate(doc.schema(t, "NativeEvent"), value, "bidi server frame") == nil {
+			t.Fatalf("bidi server frame %d: the type-tagged NativeEvent schema must not accept a key-tagged frame", i)
+		}
+	}
 }
 
 // specRef names one component schema in one spec mirror.
@@ -304,6 +411,9 @@ func wireSchemaTable() []struct {
 		{relayapi.TTSUtteranceDone{}, asyncapi("TTSUtteranceDone")},
 		{relayapi.TTSUsageUpdated{}, asyncapi("TTSUsageUpdated")},
 		{relayapi.TTSSessionClosed{}, asyncapi("TTSSessionClosed")},
+		{relayapi.BidiSetup{}, asyncapi("BidiSetup")},
+		{relayapi.BidiSetupConfig{}, asyncapi("BidiSetupConfig")},
+		{relayapi.BidiAudioChunk{}, asyncapi("BidiAudioChunk")},
 		{relayapi.LiveSessionStart{}, asyncapi("LiveSessionStart")},
 		{relayapi.LiveSessionConfig{}, asyncapi("LiveSessionConfig")},
 		{relayapi.LiveAudioConfig{}, asyncapi("LiveAudioConfig")},
