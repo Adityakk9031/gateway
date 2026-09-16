@@ -154,6 +154,27 @@ func TestThinkingLevelFollowsTheModelNotTheCaller(t *testing.T) {
 	}
 }
 
+// The native handshake must carry the caller's level all the way to the setup
+// document: reading it only from the plan would silently downgrade every
+// `medium`/`high` request to the default.
+func TestConfigureCarriesTheThinkingLevelToSetup(t *testing.T) {
+	t.Parallel()
+	configure := protocol.VoiceSessionConfigure{
+		Protocol:      protocol.SpeechProtocolGoogleLiveV1,
+		Media:         protocol.MediaFormat{Encoding: "pcm_s16le", SampleRateHz: 16_000, Channels: 1},
+		OutputMedia:   protocol.MediaFormat{Encoding: "pcm_s16le", SampleRateHz: 24_000, Channels: 1},
+		ThinkingLevel: "high",
+	}
+	if err := configure.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	setup := buildSetup("models/gemini-3.8-live-extended-thinking", configure.Options())["setup"].(map[string]any)
+	generation := setup["generationConfig"].(map[string]any)
+	if got := fmt.Sprint(generation["thinkingConfig"]); got != "map[thinkingLevel:high]" {
+		t.Fatalf("thinkingConfig = %s, want the caller's level", got)
+	}
+}
+
 func TestGeminiProviderDirectRoundTrip(t *testing.T) {
 	t.Parallel()
 	fake := newFakeGemini(t)

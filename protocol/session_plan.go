@@ -224,9 +224,18 @@ type S2SOptions struct {
 	ThinkingLevel string `json:"thinking_level,omitempty"`
 }
 
-// ThinkingLevels a Gemini Live model accepts. MINIMAL is deliberately absent:
-// the service rejects it on the only model that takes a level at all.
-var validThinkingLevels = map[string]struct{}{"low": {}, "medium": {}, "high": {}}
+// thinkingLevels are the levels a Gemini Live model accepts. MINIMAL is
+// deliberately absent: the service rejects it on the only model that takes a
+// level at all.
+var thinkingLevels = []string{"low", "medium", "high"}
+
+// ThinkingLevels returns the accepted levels, in wire order. Exported so the
+// public contract package can pin its own copy against this one — it may not
+// import protocol (relayapi/doc.go: standard library only), and a set that
+// drifts would let the edge accept a level admission rejects.
+func ThinkingLevels() []string {
+	return append([]string(nil), thinkingLevels...)
+}
 
 // ValidThinkingLevel reports whether a caller-supplied level is one the
 // service accepts. Empty is valid and means "let the adapter decide".
@@ -234,8 +243,12 @@ func ValidThinkingLevel(level string) bool {
 	if level == "" {
 		return true
 	}
-	_, ok := validThinkingLevels[level]
-	return ok
+	for _, candidate := range thinkingLevels {
+		if candidate == level {
+			return true
+		}
+	}
+	return false
 }
 
 // BidiOptions carries the caller's own Gemini Live setup document from the

@@ -116,18 +116,29 @@ func (c S2SSessionConfigure) Validate() error {
 	return nil
 }
 
-// validThinkingLevel accepts the levels a Gemini Live model can be asked for,
-// plus empty ("let the adapter decide"). MINIMAL is absent because the service
-// rejects it on the only model that takes a level at all.
+// ThinkingLevels are the levels a Gemini Live model can be asked for. MINIMAL
+// is absent because the service rejects it on the only model that takes a
+// level at all.
 //
 // Spelled out here rather than imported: this package deliberately depends on
 // the standard library alone (see doc.go), so it carries its own copy of the
-// set protocol.ValidThinkingLevel enforces plan-side. TestThinkingLevelsMatchProtocol
-// pins the two together.
+// set protocol.ThinkingLevels() enforces plan-side. Both are EXPORTED so
+// TestThinkingLevelsMatchProtocol can compare the sets themselves rather than
+// a hand-written sample — a value added to one side only would otherwise slip
+// through, and the edge would accept a level admission rejects.
+func ThinkingLevels() []string {
+	return []string{"low", "medium", "high"}
+}
+
+// validThinkingLevel also accepts empty, meaning "let the adapter decide".
 func validThinkingLevel(level string) bool {
-	switch level {
-	case "", "low", "medium", "high":
+	if level == "" {
 		return true
+	}
+	for _, candidate := range ThinkingLevels() {
+		if candidate == level {
+			return true
+		}
 	}
 	return false
 }
