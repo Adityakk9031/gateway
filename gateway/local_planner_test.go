@@ -205,6 +205,39 @@ func localPlanRequest() protocol.SessionPlanRequest {
 	}
 }
 
+// Gemini Live publishes several models on ONE row: the 3.8 generation shares
+// the 3.1 preview's socket and protocol, so it must be reachable by name while
+// "auto" keeps landing on the row default (the only measured Gemini Live id).
+func TestLocalPlannerResolvesGeminiLiveModelsByName(t *testing.T) {
+	t.Parallel()
+	planner, err := gateway.NewLocalPlanner(gateway.LocalPlannerConfig{Providers: []string{"google"}})
+	if err != nil {
+		t.Fatalf("new local planner: %v", err)
+	}
+	const endpoint = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContentConstrained"
+	for _, tc := range []struct{ model, wantModel string }{
+		{"auto", "gemini-3.1-flash-live-preview"},
+		{"", "gemini-3.1-flash-live-preview"},
+		{"gemini-3.8-live", "gemini-3.8-live"},
+		{"gemini-3.8-live-extended-thinking", "gemini-3.8-live-extended-thinking"},
+	} {
+		request := localPlanRequest()
+		request.Kind = protocol.SessionKindRealtime
+		request.Runtime.Adapters = []string{"google.live.v1"}
+		request.Request.Provider = "google"
+		request.Request.Model = tc.model
+		request.Request.Voice = "Puck"
+		request.Request.S2S = &protocol.S2SOptions{OutputMedia: &protocol.MediaFormat{Encoding: "pcm_s16le", SampleRateHz: 24_000, Channels: 1}}
+		plan, _, err := planner.CreateSessionPlan(context.Background(), request, controlplane.CreateOptions{})
+		if err != nil {
+			t.Fatalf("model %q: create local plan: %v", tc.model, err)
+		}
+		if plan.Route.Adapter != "google.live.v1" || plan.Route.Model != tc.wantModel || plan.Route.Endpoint != endpoint {
+			t.Fatalf("model %q: route = %+v", tc.model, plan.Route)
+		}
+	}
+}
+
 // The openai/realtime pair is the one (provider, kind) with two rows, and
 // they differ by protocol. "auto" and every Realtime model must stay on the
 // Realtime adapter; gpt-live-1 must reach the Live adapter by name and never
