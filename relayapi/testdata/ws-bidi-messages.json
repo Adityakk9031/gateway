@@ -2,11 +2,13 @@
   {
     "setup": {
       "model": "models/gemini-3.8-live",
-      "generationConfig": {"responseModalities": ["AUDIO"], "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Puck"}}}},
+      "generationConfig": {"responseModalities": ["AUDIO"], "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Puck"}}}, "thinkingConfig": {"thinkingLevel": "low"}},
       "systemInstruction": {"parts": [{"text": "Be concise. You are a support voice agent."}]},
       "tools": [{"functionDeclarations": [{"name": "lookup_order", "parameters": {"type": "object", "properties": {"order_id": {"type": "string"}}}}]}],
       "inputAudioTranscription": {},
-      "outputAudioTranscription": {}
+      "outputAudioTranscription": {},
+      "proactivity": {"proactiveAudio": true},
+      "historyConfig": {"initialHistoryInClientContent": false}
     }
   },
   {

@@ -25,9 +25,17 @@ const (
 	BidiRoutePath = "/v1/bidi"
 	// BidiSetupKey is the top-level key of that first frame.
 	BidiSetupKey = "setup"
-	// BidiRealtimeInputKey carries client audio. It is the media path, not a
-	// forwardable control, and never reaches the provider-command channel.
+	// BidiRealtimeInputKey is the media key. A realtimeInput frame that
+	// carries audio rides the metered media path; one that carries none
+	// (audioStreamEnd, activityStart/End, text) is forwarded as a control, and
+	// the adapter re-checks that no audio is smuggled through that channel.
 	BidiRealtimeInputKey = "realtimeInput"
+	// MaxBidiSetupFrameBytes bounds the whole setup frame. It mirrors
+	// protocol.MaxBidiSetupBytes (relayapi cannot import protocol), so a
+	// frame this decoder accepts always fits the connector handshake: the
+	// per-field bounds below sum well past it, and without this check a
+	// document could pass here and be refused one hop later.
+	MaxBidiSetupFrameBytes = 192 << 10
 )
 
 // Gemini Live setup bounds. They mirror the /v1/live bounds so one route
@@ -39,7 +47,23 @@ const (
 	MaxBidiHistoryBytes      = 256 << 10
 	MaxBidiTools             = 64
 	MaxBidiToolBytes         = 64 << 10
-	MaxBidiSettingBytes      = 4 << 10
+	// MaxBidiSettingBytes bounds each vendor setting sub-document, including
+	// generationConfig. 4 KiB holds because every member the vendor documents
+	// for Live is a scalar, an enum or a short string: responseModalities,
+	// speechConfig (voiceConfig.prebuiltVoiceConfig.voiceName, languageCode),
+	// thinkingConfig (thinkingLevel, thinkingBudget, includeThoughts),
+	// enableAffectiveDialog, mediaResolution, translationConfig and the
+	// sampling scalars together stay well under 1 KiB. The only unbounded
+	// GenerationConfig members — responseSchema and responseJsonSchema — are
+	// ones the vendor's Live reference lists as unsupported on this surface,
+	// so a document that needs more than 4 KiB here is not a Live document.
+	MaxBidiSettingBytes = 4 << 10
+	// MaxBidiTranscriptionBytes bounds inputAudioTranscription and
+	// outputAudioTranscription separately: unlike the other settings they
+	// carry open-ended phrase lists (customVocabulary, adaptationPhrases) that
+	// a caller biasing recognition toward a product catalog can legitimately
+	// grow past 4 KiB.
+	MaxBidiTranscriptionBytes = 16 << 10
 )
 
 // BidiAudioSampleRates are the PCM16 input rates the Router transports for
@@ -64,8 +88,14 @@ type BidiSetupConfig struct {
 	// Model is the exact Gemini Live model id. The vendor spells it
 	// "models/<id>"; both spellings are accepted and ModelID normalizes.
 	Model string `json:"model"`
-	// GenerationConfig carries responseModalities and speechConfig. Kept
-	// verbatim within its bound because the shape belongs to the vendor.
+	// GenerationConfig carries everything the vendor files under it on the
+	// wire: responseModalities, speechConfig, thinkingConfig (Gemini 3.8's
+	// thinkingLevel / includeThoughts), enableAffectiveDialog,
+	// mediaResolution, translationConfig and the sampling scalars. The SDK's
+	// flat LiveConnectConfig fields (thinking_config, enable_affective_dialog,
+	// media_resolution, temperature, …) all land HERE, which is why none of
+	// them is a top-level setup member. Kept verbatim within its bound
+	// because the shape belongs to the vendor.
 	GenerationConfig json.RawMessage `json:"generationConfig,omitempty"`
 	// SystemInstruction steers the live model.
 	SystemInstruction json.RawMessage `json:"systemInstruction,omitempty"`
@@ -82,12 +112,27 @@ type BidiSetupConfig struct {
 	OutputAudioTranscription json.RawMessage `json:"outputAudioTranscription,omitempty"`
 	// RealtimeInputConfig tunes vendor-side VAD and turn handling.
 	RealtimeInputConfig json.RawMessage `json:"realtimeInputConfig,omitempty"`
+	// Proactivity (proactiveAudio) and HistoryConfig
+	// (initialHistoryInClientContent) complete the setup members the vendor's
+	// Live reference documents; both ride through untouched.
+	Proactivity   json.RawMessage `json:"proactivity,omitempty"`
+	HistoryConfig json.RawMessage `json:"historyConfig,omitempty"`
+	// SafetySettings and Labels are absent from the Live reference page but
+	// present on the vendor's v1beta wire schema for this setup message, and
+	// the vendor's own SDK emits both to this endpoint
+	// (LiveConnectConfig.safety_settings / labels). Because unknown fields are
+	// refused, leaving them out would break any client that set either.
+	SafetySettings json.RawMessage `json:"safetySettings,omitempty"`
+	Labels         json.RawMessage `json:"labels,omitempty"`
 }
 
 // DecodeBidiSetup decodes the first frame strictly: unknown fields anywhere in
 // the message are refused, so a caller learns that the Router dropped nothing
 // rather than discovering it at the vendor.
 func DecodeBidiSetup(raw []byte) (BidiSetup, error) {
+	if len(raw) > MaxBidiSetupFrameBytes {
+		return BidiSetup{}, fmt.Errorf("setup frame is larger than %d bytes", MaxBidiSetupFrameBytes)
+	}
 	var setup BidiSetup
 	decoder := json.NewDecoder(strings.NewReader(string(raw)))
 	decoder.DisallowUnknownFields()
@@ -142,12 +187,22 @@ func (c BidiSetupConfig) Validate() error {
 		"generationConfig":         c.GenerationConfig,
 		"sessionResumption":        c.SessionResumption,
 		"contextWindowCompression": c.ContextWindowCompression,
-		"inputAudioTranscription":  c.InputAudioTranscription,
-		"outputAudioTranscription": c.OutputAudioTranscription,
 		"realtimeInputConfig":      c.RealtimeInputConfig,
+		"proactivity":              c.Proactivity,
+		"historyConfig":            c.HistoryConfig,
+		"safetySettings":           c.SafetySettings,
+		"labels":                   c.Labels,
 	} {
 		if len(raw) > MaxBidiSettingBytes {
 			return fmt.Errorf("%s: at most %d bytes", name, MaxBidiSettingBytes)
+		}
+	}
+	for name, raw := range map[string]json.RawMessage{
+		"inputAudioTranscription":  c.InputAudioTranscription,
+		"outputAudioTranscription": c.OutputAudioTranscription,
+	} {
+		if len(raw) > MaxBidiTranscriptionBytes {
+			return fmt.Errorf("%s: at most %d bytes", name, MaxBidiTranscriptionBytes)
 		}
 	}
 	return nil

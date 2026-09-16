@@ -39,6 +39,86 @@ func TestBidiSetupAcceptsBothModelSpellings(t *testing.T) {
 	}
 }
 
+func TestBidiSetupAcceptsEveryDocumentedField(t *testing.T) {
+	t.Parallel()
+	// DecodeBidiSetup refuses unknown fields, so every setup member the vendor
+	// documents must be known here or a real client breaks at the Router.
+	// The list is BidiGenerateContentSetup from https://ai.google.dev/api/live
+	// (model, generationConfig, systemInstruction, tools, realtimeInputConfig,
+	// sessionResumption, contextWindowCompression, inputAudioTranscription,
+	// outputAudioTranscription, proactivity, historyConfig) plus the two
+	// members the SDK also emits to this endpoint (safetySettings, labels).
+	// The generationConfig body is the live-guide's largest example converted
+	// to the wire's camelCase: thinkingConfig, enableAffectiveDialog and
+	// mediaResolution live INSIDE generationConfig, not beside it.
+	raw := `{"setup":{
+		"model":"models/gemini-3.8-live",
+		"generationConfig":{
+			"responseModalities":["AUDIO"],
+			"temperature":0.7,"topP":0.95,"topK":40,"maxOutputTokens":2048,"seed":7,
+			"speechConfig":{"voiceConfig":{"prebuiltVoiceConfig":{"voiceName":"Kore"}},"languageCode":"en-US"},
+			"thinkingConfig":{"thinkingLevel":"low","includeThoughts":true},
+			"enableAffectiveDialog":true,
+			"mediaResolution":"MEDIA_RESOLUTION_LOW",
+			"translationConfig":{"targetLanguageCode":"es-ES","echoTargetLanguage":false}
+		},
+		"systemInstruction":{"parts":[{"text":"Be concise."}]},
+		"tools":[{"functionDeclarations":[{"name":"lookup_order","parameters":{"type":"object","properties":{"order_id":{"type":"string"}}}}]},{"googleSearch":{}}],
+		"realtimeInputConfig":{
+			"automaticActivityDetection":{"disabled":false,"startOfSpeechSensitivity":"START_SENSITIVITY_LOW","endOfSpeechSensitivity":"END_SENSITIVITY_LOW","prefixPaddingMs":20,"silenceDurationMs":100},
+			"activityHandling":"START_OF_ACTIVITY_INTERRUPTS",
+			"turnCoverage":"TURN_INCLUDES_ONLY_ACTIVITY"
+		},
+		"sessionResumption":{"handle":"resume-token"},
+		"contextWindowCompression":{"triggerTokens":"25600","slidingWindow":{"targetTokens":"12800"}},
+		"inputAudioTranscription":{"languageCodes":["en-US"],"customVocabulary":["Speko"],"wordTimestamp":true,"diarization":false,"mode":"MODE_UNSPECIFIED"},
+		"outputAudioTranscription":{},
+		"proactivity":{"proactiveAudio":true},
+		"historyConfig":{"initialHistoryInClientContent":false},
+		"safetySettings":[{"category":"HARM_CATEGORY_HARASSMENT","threshold":"BLOCK_ONLY_HIGH"}],
+		"labels":{"safety_identifier":"user_session_123"}
+	}}`
+	setup, err := relayapi.DecodeBidiSetup([]byte(raw))
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if err := setup.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if got := setup.Setup.ModelID(); got != "gemini-3.8-live" {
+		t.Fatalf("ModelID = %q", got)
+	}
+	// Every passthrough field must have landed, not merely been tolerated:
+	// a field decoded to nothing would be dropped on forward.
+	for name, raw := range map[string]json.RawMessage{
+		"generationConfig":         setup.Setup.GenerationConfig,
+		"systemInstruction":        setup.Setup.SystemInstruction,
+		"realtimeInputConfig":      setup.Setup.RealtimeInputConfig,
+		"sessionResumption":        setup.Setup.SessionResumption,
+		"contextWindowCompression": setup.Setup.ContextWindowCompression,
+		"inputAudioTranscription":  setup.Setup.InputAudioTranscription,
+		"outputAudioTranscription": setup.Setup.OutputAudioTranscription,
+		"proactivity":              setup.Setup.Proactivity,
+		"historyConfig":            setup.Setup.HistoryConfig,
+		"safetySettings":           setup.Setup.SafetySettings,
+		"labels":                   setup.Setup.Labels,
+	} {
+		if len(raw) == 0 {
+			t.Errorf("%s was not captured", name)
+		}
+	}
+	if len(setup.Setup.Tools) != 2 {
+		t.Errorf("tools = %d entries, want 2", len(setup.Setup.Tools))
+	}
+	var generation map[string]json.RawMessage
+	if err := json.Unmarshal(setup.Setup.GenerationConfig, &generation); err != nil {
+		t.Fatalf("generationConfig: %v", err)
+	}
+	if _, ok := generation["thinkingConfig"]; !ok {
+		t.Error("generationConfig.thinkingConfig was not preserved")
+	}
+}
+
 func TestBidiSetupRejectsUnknownFields(t *testing.T) {
 	t.Parallel()
 	// Strict decoding is the promise that the Router forwarded everything it
@@ -72,6 +152,21 @@ func TestBidiSetupBoundsOversizedDocuments(t *testing.T) {
 	setup = validBidiSetup(t)
 	setup.Setup.RealtimeInputConfig = json.RawMessage(`{"pad":"` + strings.Repeat("a", relayapi.MaxBidiSettingBytes) + `"}`)
 	assertInvalid(t, setup.Validate(), "realtimeInputConfig")
+
+	setup = validBidiSetup(t)
+	setup.Setup.Proactivity = json.RawMessage(`{"pad":"` + strings.Repeat("a", relayapi.MaxBidiSettingBytes) + `"}`)
+	assertInvalid(t, setup.Validate(), "proactivity")
+
+	// Transcription configs have their own, larger bound: a phrase list that
+	// the setting bound would refuse must pass, and the larger bound must
+	// still hold.
+	setup = validBidiSetup(t)
+	setup.Setup.InputAudioTranscription = json.RawMessage(`{"customVocabulary":["` + strings.Repeat("a", relayapi.MaxBidiSettingBytes) + `"]}`)
+	if err := setup.Validate(); err != nil {
+		t.Fatalf("a %d-byte inputAudioTranscription must pass: %v", relayapi.MaxBidiSettingBytes, err)
+	}
+	setup.Setup.OutputAudioTranscription = json.RawMessage(`{"customVocabulary":["` + strings.Repeat("a", relayapi.MaxBidiTranscriptionBytes) + `"]}`)
+	assertInvalid(t, setup.Validate(), "outputAudioTranscription")
 
 	setup = validBidiSetup(t)
 	tools := make([]json.RawMessage, relayapi.MaxBidiTools+1)
@@ -135,5 +230,17 @@ func TestBidiRouteIsDistinctFromTheOpenAIRoutes(t *testing.T) {
 	}
 	if len(paths) != 3 {
 		t.Fatalf("voice route paths collide: %v", paths)
+	}
+}
+
+func TestDecodeBidiSetupRefusesOversizedFrames(t *testing.T) {
+	t.Parallel()
+	// The per-field bounds sum past the connector handshake bound, so the
+	// frame as a whole is checked first: a document accepted here must never
+	// be refused one hop later.
+	padding := strings.Repeat("x", relayapi.MaxBidiSetupFrameBytes)
+	frame := []byte(`{"setup":{"model":"gemini-3.8-live","systemInstruction":{"parts":[{"text":"` + padding + `"}]}}}`)
+	if _, err := relayapi.DecodeBidiSetup(frame); err == nil {
+		t.Fatal("an oversized setup frame must be refused")
 	}
 }

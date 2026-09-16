@@ -3,7 +3,7 @@
   "info": {
     "title": "Speko Router streaming API",
     "version": "1.0.0",
-    "description": "WebSocket contract of the Speko Router: streaming speech-to-text and text-to-speech sessions, plus the two native speech-to-speech routes. On the STT and TTS routes JSON text frames carry the control messages and events documented here and binary frames carry raw audio in the format the session.configure frame declared, with no JSON envelope. On /v1/realtime and /v1/live the Router speaks the OpenAI Realtime and GPT-Live event protocols natively: audio travels base64-encoded inside the vendor's own JSON events, the Router forwards a bounded set of vendor commands and every vendor server event verbatim, and only its own error frame is Router-shaped. The Go types in package relayapi are the source of truth for every Router-defined shape in this document, and speccheck_test.go machine-checks the two against each other. The HTTP endpoints are specified separately in openapi.yaml."
+    "description": "WebSocket contract of the Speko Router: streaming speech-to-text and text-to-speech sessions, plus the three native speech-to-speech routes. On the STT and TTS routes JSON text frames carry the control messages and events documented here and binary frames carry raw audio in the format the session.configure frame declared, with no JSON envelope. On /v1/realtime, /v1/live and /v1/bidi the Router speaks the OpenAI Realtime, GPT-Live and Gemini Live protocols natively: audio travels base64-encoded inside the vendor's own JSON events, the Router forwards a bounded set of vendor commands and every vendor server event verbatim, and only its own error frame is Router-shaped. The Go types in package relayapi are the source of truth for every Router-defined shape in this document, and speccheck_test.go machine-checks the two against each other. The HTTP endpoints are specified separately in openapi.yaml."
   },
   "defaultContentType": "application/json",
   "servers": {
@@ -13,9 +13,7 @@
       "description": "Global entry point. The upgrade request authenticates with a Speko-issued bearer token and must carry an Idempotency-Key header. The idempotency content hash of a WebSocket session is the SHA-256 of the exact session.configure text-frame bytes, so a retry must reproduce the configure frame byte-for-byte; later frames are intentionally outside the hash — they are the stream's continuous content, guarded by budgets and leases, while the configure frame is the session's intent.",
       "security": [
         {
-          "bearerAuth": [
-
-          ]
+          "bearerAuth": []
         }
       ]
     }
@@ -1352,7 +1350,7 @@
           },
           "generationConfig": {
             "type": "object",
-            "description": "responseModalities and speechConfig, forwarded verbatim."
+            "description": "Everything the vendor files under generationConfig, forwarded verbatim: responseModalities, speechConfig, thinkingConfig, enableAffectiveDialog, mediaResolution, translationConfig and the sampling scalars. The SDK's flat thinking_config / enable_affective_dialog / media_resolution fields land here on the wire, not beside it."
           },
           "systemInstruction": {
             "type": "object",
@@ -1376,15 +1374,34 @@
           },
           "inputAudioTranscription": {
             "type": "object",
-            "description": "Enables the vendor's transcript of the caller."
+            "description": "Enables the vendor's transcript of the caller; may carry customVocabulary and adaptationPhrases lists."
           },
           "outputAudioTranscription": {
             "type": "object",
-            "description": "Enables the vendor's transcript of the model."
+            "description": "Enables the vendor's transcript of the model; may carry customVocabulary and adaptationPhrases lists."
           },
           "realtimeInputConfig": {
             "type": "object",
             "description": "Vendor-side VAD and turn-handling settings."
+          },
+          "proactivity": {
+            "type": "object",
+            "description": "Vendor proactive-audio setting (proactiveAudio)."
+          },
+          "historyConfig": {
+            "type": "object",
+            "description": "Vendor history-exchange setting (initialHistoryInClientContent)."
+          },
+          "safetySettings": {
+            "type": "array",
+            "description": "Vendor safety settings, forwarded verbatim. Absent from the Live reference page but on the wire schema and emitted by the vendor SDK.",
+            "items": {
+              "type": "object"
+            }
+          },
+          "labels": {
+            "type": "object",
+            "description": "Vendor request labels (for example safety_identifier), forwarded verbatim."
           }
         },
         "required": [

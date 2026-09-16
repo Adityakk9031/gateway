@@ -13,8 +13,8 @@ import (
 // wss://api.openai.com/v1/realtime, while gpt-live-1 speaks the Live protocol
 // on wss://api.openai.com/v1/live/sessions. Catalog rows carry the protocol,
 // signed relay plans assert it, connectors verify it before touching a
-// credential, and the Router exposes the OpenAI protocols natively on their
-// own public routes.
+// credential, and the Router exposes the OpenAI protocols and Gemini Live
+// natively on their own public routes (/v1/realtime, /v1/live, /v1/bidi).
 type SpeechProtocol string
 
 const (
@@ -78,6 +78,11 @@ const (
 	MaxLiveSettingBytes             = 4 << 10
 	MinLiveMaxOutputTokens          = 16
 	MaxLiveMaxOutputTokens          = 131_072
+	// MaxBidiSetupBytes bounds the Gemini Live setup document forwarded from
+	// the public /v1/bidi socket. relayapi.MaxBidiSetupFrameBytes mirrors it
+	// on the whole first frame, so a document the route accepts always fits
+	// through here; the two must move together.
+	MaxBidiSetupBytes = 192 << 10
 	// MaxLiveContextAppendBytes bounds the content of one
 	// session.{instructions,thinking,commentary}.append. The vendor caps an
 	// append at 500 tokens; 16 KiB of UTF-8 is far above that in every
@@ -577,6 +582,9 @@ type VoiceSessionConfigure struct {
 	Voice        string         `json:"voice,omitempty"`
 	Instructions string         `json:"instructions,omitempty"`
 	Live         *LiveOptions   `json:"live,omitempty"`
+	// Bidi carries the caller's Gemini Live setup document on the native
+	// /v1/bidi route. Nil on every other protocol.
+	Bidi *BidiOptions `json:"bidi,omitempty"`
 }
 
 // Validate checks the configure document.
@@ -596,6 +604,14 @@ func (c VoiceSessionConfigure) Validate() error {
 	if len(c.Instructions) > MaxLiveInstructionsBytes {
 		return fmt.Errorf("instructions: at most %d bytes", MaxLiveInstructionsBytes)
 	}
+	if c.Bidi != nil {
+		if c.Protocol != SpeechProtocolGoogleLiveV1 {
+			return fmt.Errorf("bidi: only google.live.v1 sessions carry a setup document")
+		}
+		if err := c.Bidi.Validate(); err != nil {
+			return fmt.Errorf("bidi: %w", err)
+		}
+	}
 	if c.Live != nil {
 		if c.Protocol != SpeechProtocolOpenAILiveV1 {
 			return fmt.Errorf("live: valid only for %s", SpeechProtocolOpenAILiveV1)
@@ -613,6 +629,6 @@ func (c VoiceSessionConfigure) Options() RequestOptions {
 	output := c.OutputMedia
 	return RequestOptions{
 		Voice: c.Voice,
-		S2S:   &S2SOptions{Instructions: c.Instructions, OutputMedia: &output, Live: c.Live},
+		S2S:   &S2SOptions{Instructions: c.Instructions, OutputMedia: &output, Live: c.Live, Bidi: c.Bidi},
 	}
 }

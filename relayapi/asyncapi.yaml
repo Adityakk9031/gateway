@@ -1,5 +1,5 @@
-# json-mirror: asyncapi.json sha256:573cb83965e6c560f18a549f50008ac021ee0ad373a14cf35004da8fad876c86
-# yaml-body: sha256:89b4866fedddb24cbee0c28ae28729d1b96facb807624d4deafe9dec5b29bec8
+# json-mirror: asyncapi.json sha256:8b79afc1ef1ce53ca80327e27dfa264e559d35a9837786bb2476f2af64d566ea
+# yaml-body: sha256:d63e795c08223ffe8677d17a83e2bcbf10b022b1bd56cae3d9f8dd89161e1e51
 #
 # This YAML document is the hand-authored, human-readable source of the
 # WebSocket contract. asyncapi.json is its checked-in JSON mirror: the same
@@ -20,15 +20,16 @@ info:
   version: "1.0.0"
   description: >-
     WebSocket contract of the Speko Router: streaming speech-to-text and
-    text-to-speech sessions, plus the two native speech-to-speech routes. On
-    the STT and TTS routes JSON text frames carry the control messages and
+    text-to-speech sessions, plus the three native speech-to-speech routes.
+    On the STT and TTS routes JSON text frames carry the control messages and
     events documented here and binary frames carry raw audio in the format
     the session.configure frame declared, with no JSON envelope. On
-    /v1/realtime and /v1/live the Router speaks the OpenAI Realtime and
-    GPT-Live event protocols natively: audio travels base64-encoded inside
-    the vendor's own JSON events, the Router forwards a bounded set of vendor
-    commands and every vendor server event verbatim, and only its own error
-    frame is Router-shaped. The Go types in package relayapi are the source
+    /v1/realtime, /v1/live and /v1/bidi the Router speaks the OpenAI
+    Realtime, GPT-Live and Gemini Live protocols natively: audio travels
+    base64-encoded inside the vendor's own JSON events, the Router forwards a
+    bounded set of vendor commands and every vendor server event verbatim,
+    and only its own error frame is Router-shaped. The Go types in package
+    relayapi are the source
     of truth for every Router-defined shape in this document, and
     speccheck_test.go machine-checks the two against each other. The HTTP
     endpoints are specified separately in openapi.yaml.
@@ -1301,7 +1302,13 @@ components:
           maxLength: 136
         generationConfig:
           type: object
-          description: responseModalities and speechConfig, forwarded verbatim.
+          description: >-
+            Everything the vendor files under generationConfig, forwarded
+            verbatim: responseModalities, speechConfig, thinkingConfig,
+            enableAffectiveDialog, mediaResolution, translationConfig and the
+            sampling scalars. The SDK's flat thinking_config /
+            enable_affective_dialog / media_resolution fields land here on the
+            wire, not beside it.
         systemInstruction:
           type: object
           description: Instruction parts steering the live model.
@@ -1319,13 +1326,37 @@ components:
           description: Vendor context-window compression settings.
         inputAudioTranscription:
           type: object
-          description: Enables the vendor's transcript of the caller.
+          description: >-
+            Enables the vendor's transcript of the caller; may carry
+            customVocabulary and adaptationPhrases lists.
         outputAudioTranscription:
           type: object
-          description: Enables the vendor's transcript of the model.
+          description: >-
+            Enables the vendor's transcript of the model; may carry
+            customVocabulary and adaptationPhrases lists.
         realtimeInputConfig:
           type: object
           description: Vendor-side VAD and turn-handling settings.
+        proactivity:
+          type: object
+          description: Vendor proactive-audio setting (proactiveAudio).
+        historyConfig:
+          type: object
+          description: >-
+            Vendor history-exchange setting (initialHistoryInClientContent).
+        safetySettings:
+          type: array
+          description: >-
+            Vendor safety settings, forwarded verbatim. Absent from the Live
+            reference page but on the wire schema and emitted by the vendor
+            SDK.
+          items:
+            type: object
+        labels:
+          type: object
+          description: >-
+            Vendor request labels (for example safety_identifier), forwarded
+            verbatim.
       required:
         - model
       additionalProperties: false

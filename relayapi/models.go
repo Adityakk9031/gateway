@@ -227,8 +227,8 @@ func (m Model) Validate() error {
 		if len(m.OutputAudioFormats) == 0 {
 			return fmt.Errorf("output_audio_formats: at least one format is required for s2s models")
 		}
-		if m.Endpoint != RealtimeRoutePath && m.Endpoint != LiveRoutePath {
-			return fmt.Errorf("endpoint: s2s models are served on %s or %s, got %q", RealtimeRoutePath, LiveRoutePath, m.Endpoint)
+		if m.Endpoint != RealtimeRoutePath && m.Endpoint != LiveRoutePath && m.Endpoint != BidiRoutePath {
+			return fmt.Errorf("endpoint: s2s models are served on %s, %s or %s, got %q", RealtimeRoutePath, LiveRoutePath, BidiRoutePath, m.Endpoint)
 		}
 		if strings.TrimSpace(m.Protocol) == "" || strings.ContainsAny(m.Protocol, " \t\r\n") {
 			return fmt.Errorf("protocol: required for s2s models")
