@@ -246,11 +246,12 @@ func TestWSMessageSamplesMatchAsyncAPISchemas(t *testing.T) {
 		schema, defined := bidiSchemaByKey[key]
 		if !defined {
 			// clientContent and toolResponse are forwarded verbatim; their
-			// shapes belong to the vendor, so the Router defines no schema.
+			// insides belong to the vendor, but the published channel still
+			// promises the key-tagged envelope, so they are held to it.
 			if !protocol.BidiControlAllowed(key) {
 				t.Fatalf("ws-bidi-messages.json[%d]: key %q is neither Router-defined nor forwardable", i, key)
 			}
-			continue
+			schema = "BidiClientEvent"
 		}
 		doc.validateAgainst(t, schema, frame, "ws-bidi-messages.json["+strconv.Itoa(i)+"]")
 	}
@@ -262,6 +263,25 @@ func TestWSMessageSamplesMatchAsyncAPISchemas(t *testing.T) {
 	for _, key := range protocol.BidiControlKeys() {
 		if !seenKeys[key] {
 			t.Fatalf("ws-bidi-messages.json: fixture must exercise forwardable key %q", key)
+		}
+	}
+	// The server side has no fixture file: the frames are the vendor's, so a
+	// representative set (including the usageMetadata sibling) is held to the
+	// published envelope here, and the type-tagged schema must NOT accept them
+	// — that is the mistake this schema exists to prevent.
+	for i, frame := range []string{
+		`{"setupComplete":{}}`,
+		`{"serverContent":{"modelTurn":{"parts":[{"inlineData":{"mimeType":"audio/pcm;rate=24000","data":"AAAA"}}]}},"usageMetadata":{"promptTokenCount":2,"responseTokenCount":3}}`,
+		`{"toolCall":{"functionCalls":[{"id":"call_1","name":"lookup_order","args":{}}]}}`,
+		`{"goAway":{"timeLeft":"10s"}}`,
+	} {
+		doc.validateAgainst(t, "BidiServerEvent", json.RawMessage(frame), "bidi server frame "+strconv.Itoa(i))
+		var value any
+		if err := json.Unmarshal([]byte(frame), &value); err != nil {
+			t.Fatalf("bidi server frame %d: %v", i, err)
+		}
+		if doc.validate(doc.schema(t, "NativeEvent"), value, "bidi server frame") == nil {
+			t.Fatalf("bidi server frame %d: the type-tagged NativeEvent schema must not accept a key-tagged frame", i)
 		}
 	}
 }

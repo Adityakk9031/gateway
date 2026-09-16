@@ -244,3 +244,49 @@ func TestDecodeBidiSetupRefusesOversizedFrames(t *testing.T) {
 		t.Fatal("an oversized setup frame must be refused")
 	}
 }
+
+func TestDecodeBidiSetupRefusesTrailingDelimiters(t *testing.T) {
+	t.Parallel()
+	// Decoder.More reports false at a stray closing delimiter, so the earlier
+	// check let `}}}` through; only a decode that reaches EOF proves the frame
+	// was consumed whole.
+	for _, frame := range []string{
+		`{"setup":{"model":"gemini-3.8-live"}}}`,
+		`{"setup":{"model":"gemini-3.8-live"}}]`,
+		`{"setup":{"model":"gemini-3.8-live"}} {}`,
+	} {
+		if _, err := relayapi.DecodeBidiSetup([]byte(frame)); err == nil {
+			t.Fatalf("%s must be refused", frame)
+		}
+	}
+}
+
+func TestBidiSetupRefusesMalformedSettingShapes(t *testing.T) {
+	t.Parallel()
+	// The settings stay opaque inside, but a scalar where the vendor documents
+	// an object (or an array, for safetySettings) is a malformed document and
+	// is refused at the hop rather than passed on to fail at the vendor.
+	for _, frame := range []string{
+		`{"setup":{"model":"gemini-3.8-live","generationConfig":false}}`,
+		`{"setup":{"model":"gemini-3.8-live","tools":[42]}}`,
+		`{"setup":{"model":"gemini-3.8-live","systemInstruction":"be brief"}}`,
+		`{"setup":{"model":"gemini-3.8-live","safetySettings":{}}}`,
+		`{"setup":{"model":"gemini-3.8-live","inputAudioTranscription":[]}}`,
+		`{"setup":{"model":"gemini-3.8-live","labels":"prod"}}`,
+	} {
+		setup, err := relayapi.DecodeBidiSetup([]byte(frame))
+		if err != nil {
+			t.Fatalf("%s: decode: %v", frame, err)
+		}
+		if err := setup.Validate(); err == nil {
+			t.Fatalf("%s must fail validation", frame)
+		}
+	}
+	setup, err := relayapi.DecodeBidiSetup([]byte(`{"setup":{"model":"gemini-3.8-live","generationConfig":{},"tools":[{}],"systemInstruction":{"parts":[]},"safetySettings":[],"labels":{}}}`))
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if err := setup.Validate(); err != nil {
+		t.Fatalf("well-shaped settings must validate: %v", err)
+	}
+}

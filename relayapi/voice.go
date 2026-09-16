@@ -2,7 +2,9 @@ package relayapi
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"unicode/utf8"
 )
@@ -146,7 +148,9 @@ func DecodeLiveSessionStart(raw []byte) (LiveSessionStart, error) {
 	if err := decoder.Decode(&start); err != nil {
 		return LiveSessionStart{}, fmt.Errorf("session.start is not a valid frame: %w", err)
 	}
-	if decoder.More() {
+	// Decoder.More reports false at a stray closing delimiter, so it cannot
+	// prove the frame was consumed: only a second decode that hits EOF can.
+	if err := decoder.Decode(new(json.RawMessage)); !errors.Is(err, io.EOF) {
 		return LiveSessionStart{}, fmt.Errorf("session.start frame carries trailing content")
 	}
 	return start, nil
@@ -402,4 +406,9 @@ func (c LiveResponsesConfig) ToolTypes() []string {
 
 func isJSONObject(raw json.RawMessage) bool {
 	return json.Valid(raw) && strings.HasPrefix(strings.TrimSpace(string(raw)), "{")
+}
+
+func isJSONArray(raw json.RawMessage) bool {
+	trimmed := strings.TrimSpace(string(raw))
+	return strings.HasPrefix(trimmed, "[") && json.Valid(raw)
 }

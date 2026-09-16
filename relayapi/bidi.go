@@ -2,7 +2,9 @@ package relayapi
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"unicode/utf8"
 )
@@ -139,7 +141,9 @@ func DecodeBidiSetup(raw []byte) (BidiSetup, error) {
 	if err := decoder.Decode(&setup); err != nil {
 		return BidiSetup{}, fmt.Errorf("setup is not a valid frame: %w", err)
 	}
-	if decoder.More() {
+	// Decoder.More reports false at a stray closing delimiter, so it cannot
+	// prove the frame was consumed: only a second decode that hits EOF can.
+	if err := decoder.Decode(new(json.RawMessage)); !errors.Is(err, io.EOF) {
 		return BidiSetup{}, fmt.Errorf("setup frame carries trailing content")
 	}
 	return setup, nil
@@ -178,11 +182,21 @@ func (c BidiSetupConfig) Validate() error {
 	if len(c.Tools) > MaxBidiTools {
 		return fmt.Errorf("tools: at most %d entries", MaxBidiTools)
 	}
+	if len(c.SystemInstruction) > 0 && !isJSONObject(c.SystemInstruction) {
+		return fmt.Errorf("systemInstruction: must be a JSON object")
+	}
 	for i, tool := range c.Tools {
 		if len(tool) > MaxBidiToolBytes {
 			return fmt.Errorf("tools[%d]: at most %d bytes", i, MaxBidiToolBytes)
 		}
+		if !isJSONObject(tool) {
+			return fmt.Errorf("tools[%d]: must be a JSON object", i)
+		}
 	}
+	// The settings stay opaque inside, but their OUTER kind is the vendor's
+	// documented contract: an object (or, for safetySettings, an array). A
+	// scalar here is a malformed document, and refusing it at the hop is
+	// cheaper for the caller than a vendor rejection mid-handshake.
 	for name, raw := range map[string]json.RawMessage{
 		"generationConfig":         c.GenerationConfig,
 		"sessionResumption":        c.SessionResumption,
@@ -190,12 +204,20 @@ func (c BidiSetupConfig) Validate() error {
 		"realtimeInputConfig":      c.RealtimeInputConfig,
 		"proactivity":              c.Proactivity,
 		"historyConfig":            c.HistoryConfig,
-		"safetySettings":           c.SafetySettings,
 		"labels":                   c.Labels,
 	} {
 		if len(raw) > MaxBidiSettingBytes {
 			return fmt.Errorf("%s: at most %d bytes", name, MaxBidiSettingBytes)
 		}
+		if len(raw) > 0 && !isJSONObject(raw) {
+			return fmt.Errorf("%s: must be a JSON object", name)
+		}
+	}
+	if len(c.SafetySettings) > MaxBidiSettingBytes {
+		return fmt.Errorf("safetySettings: at most %d bytes", MaxBidiSettingBytes)
+	}
+	if len(c.SafetySettings) > 0 && !isJSONArray(c.SafetySettings) {
+		return fmt.Errorf("safetySettings: must be a JSON array")
 	}
 	for name, raw := range map[string]json.RawMessage{
 		"inputAudioTranscription":  c.InputAudioTranscription,
@@ -203,6 +225,9 @@ func (c BidiSetupConfig) Validate() error {
 	} {
 		if len(raw) > MaxBidiTranscriptionBytes {
 			return fmt.Errorf("%s: at most %d bytes", name, MaxBidiTranscriptionBytes)
+		}
+		if len(raw) > 0 && !isJSONObject(raw) {
+			return fmt.Errorf("%s: must be a JSON object", name)
 		}
 	}
 	return nil

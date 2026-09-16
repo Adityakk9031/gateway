@@ -504,6 +504,11 @@ func (o S2SOptions) validate() error {
 			return fmt.Errorf("live: %w", err)
 		}
 	}
+	if o.Bidi != nil {
+		if err := o.Bidi.Validate(); err != nil {
+			return fmt.Errorf("bidi: %w", err)
+		}
+	}
 	return nil
 }
 

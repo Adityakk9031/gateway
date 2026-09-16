@@ -317,7 +317,7 @@
               "$ref": "#/components/messages/bidiRealtimeInput"
             },
             {
-              "$ref": "#/components/messages/nativeClientEvent"
+              "$ref": "#/components/messages/bidiClientEvent"
             }
           ]
         }
@@ -328,7 +328,7 @@
         "message": {
           "oneOf": [
             {
-              "$ref": "#/components/messages/nativeServerEvent"
+              "$ref": "#/components/messages/bidiServerEvent"
             },
             {
               "$ref": "#/components/messages/wsError"
@@ -557,6 +557,22 @@
         "summary": "One vendor server event delivered verbatim, native identifiers included.",
         "payload": {
           "$ref": "#/components/schemas/NativeEvent"
+        }
+      },
+      "bidiClientEvent": {
+        "name": "bidi client event",
+        "title": "Gemini Live client message",
+        "summary": "One Gemini Live client message forwarded verbatim within the route's bounded key set (clientContent, toolResponse). Its shape is the vendor's; the Router reads only the single top-level key, since this protocol carries no type tag.",
+        "payload": {
+          "$ref": "#/components/schemas/BidiClientEvent"
+        }
+      },
+      "bidiServerEvent": {
+        "name": "bidi server event",
+        "title": "Gemini Live server message",
+        "summary": "One Gemini Live server message delivered verbatim. It is keyed by its union member (setupComplete, serverContent, toolCall, toolCallCancellation, goAway, sessionResumptionUpdate) and may carry a usageMetadata sibling beside it.",
+        "payload": {
+          "$ref": "#/components/schemas/BidiServerEvent"
         }
       },
       "wsError": {
@@ -1324,6 +1340,20 @@
         "required": [
           "type"
         ],
+        "additionalProperties": true
+      },
+      "BidiClientEvent": {
+        "type": "object",
+        "description": "A Gemini Live client message. There is no type tag: the single top-level key IS the message type, so exactly one property is present and its value is the vendor's own document, forwarded unchanged.",
+        "minProperties": 1,
+        "maxProperties": 1,
+        "additionalProperties": true
+      },
+      "BidiServerEvent": {
+        "type": "object",
+        "description": "A Gemini Live server message, delivered byte-for-byte. Keyed by its union member; the vendor may attach a usageMetadata sibling to the same message, so a frame can carry two top-level properties.",
+        "minProperties": 1,
+        "maxProperties": 2,
         "additionalProperties": true
       },
       "BidiSetup": {
