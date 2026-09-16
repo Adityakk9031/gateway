@@ -138,7 +138,15 @@ var providerCatalog = []CatalogEntry{
 	// explicitly selectable only — it never joins automatic selection — so
 	// the row lists exactly its one model and resolution reaches it by name.
 	{Provider: "openai", Kind: protocol.SessionKindRealtime, Adapter: "openai.live.v1", Protocol: protocol.SpeechProtocolOpenAILiveV1, DefaultModel: "gpt-live-1", Models: []string{"gpt-live-1"}, DefaultVoice: "marin", Transport: protocol.TransportWebSocket, Endpoint: "wss://api.openai.com/v1/live/sessions"},
-	{Provider: "google", Kind: protocol.SessionKindRealtime, Adapter: "google.live.v1", Protocol: protocol.SpeechProtocolGoogleLiveV1, DefaultModel: "gemini-3.1-flash-live-preview", DefaultVoice: "Puck", Transport: protocol.TransportWebSocket, Endpoint: "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContentConstrained"},
+	// Gemini 3.8 Live is Google's current Live API generation (ai.google.dev
+	// models, 2026-09-16): gemini-3.8-live is the low-latency default and
+	// gemini-3.8-live-extended-thinking the reasoning tier, both on the SAME
+	// BidiGenerateContent surface and wire protocol as the 3.1 preview, so
+	// they are models on this row rather than a second adapter. Google labels
+	// gemini-3.1-flash-live-preview legacy, but it stays the row default here:
+	// it is the only Gemini Live id the S2S board has measured, and moving the
+	// default is a routing change, not a table growth.
+	{Provider: "google", Kind: protocol.SessionKindRealtime, Adapter: "google.live.v1", Protocol: protocol.SpeechProtocolGoogleLiveV1, DefaultModel: "gemini-3.1-flash-live-preview", Models: []string{"gemini-3.1-flash-live-preview", "gemini-3.8-live", "gemini-3.8-live-extended-thinking"}, DefaultVoice: "Puck", Transport: protocol.TransportWebSocket, Endpoint: "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContentConstrained"},
 	{Provider: "xai", Kind: protocol.SessionKindRealtime, Adapter: "xai.realtime.v1", Protocol: protocol.SpeechProtocolXAIRealtimeV1, DefaultModel: "grok-voice-latest", Models: []string{"grok-voice-latest", "grok-voice-think-fast-2.0", "grok-voice-think-fast-1.0", "grok-voice-fast-1.0"}, DefaultVoice: "eve", Transport: protocol.TransportWebSocket, Endpoint: "wss://api.x.ai/v1/realtime"},
 	{Provider: "openai", Kind: protocol.SessionKindTTS, Adapter: "openai.tts.v1", DefaultModel: "gpt-4o-mini-tts", Transport: protocol.TransportHTTP, Endpoint: "https://api.openai.com/v1/audio/speech"},
 	{Provider: "soniox", Kind: protocol.SessionKindSTT, Adapter: "soniox.stt.v1", DefaultModel: "stt-rt-v5", Transport: protocol.TransportWebSocket, Endpoint: "wss://stt-rt.soniox.com/transcribe-websocket"},
