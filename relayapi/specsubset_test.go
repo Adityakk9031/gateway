@@ -174,6 +174,12 @@ func (d *specDoc) validate(schema map[string]any, value any, path string) error 
 		}
 	}
 	if object, ok := value.(map[string]any); ok {
+		if bound, ok := schema["minProperties"].(float64); ok && len(object) < int(bound) {
+			return fmt.Errorf("%s: fewer than minProperties %d properties", path, int(bound))
+		}
+		if bound, ok := schema["maxProperties"].(float64); ok && len(object) > int(bound) {
+			return fmt.Errorf("%s: more than maxProperties %d properties", path, int(bound))
+		}
 		if required, ok := schema["required"].([]any); ok {
 			for _, name := range required {
 				if _, present := object[name.(string)]; !present {

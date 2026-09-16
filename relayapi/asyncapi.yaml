@@ -1,5 +1,5 @@
-# json-mirror: asyncapi.json sha256:d7f7af4054b750e56952e8d23af0253f9c9f51bc11e5ae38bd0f4d551348c4ba
-# yaml-body: sha256:7577b5df5079817afc921c695d907d246c3d0fdf15e964a2440196d81a689c2a
+# json-mirror: asyncapi.json sha256:bb41b4622c0a5c79b7a44406814feb4dd7afedf70e316afc74cbdd1ba366dc8b
+# yaml-body: sha256:1a21b421fd1f8f29f4ee14133bc6e9feaaba10fd5c5b0843d1f1c7296ea4b816
 #
 # This YAML document is the hand-authored, human-readable source of the
 # WebSocket contract. asyncapi.json is its checked-in JSON mirror: the same
@@ -1300,20 +1300,32 @@ components:
     BidiClientEvent:
       type: object
       description: >-
-        A Gemini Live client message. There is no type tag: the single
-        top-level key IS the message type, so exactly one property is present
-        and its value is the vendor's own document, forwarded unchanged.
+        A forwardable Gemini Live client message. There is no type tag: the
+        single top-level key IS the message type, so exactly one property is
+        present and its value is the vendor's own document, forwarded
+        unchanged. Only the two forwardable keys are admitted here; setup and
+        realtimeInput have their own messages on the channel, so every client
+        frame matches exactly one published alternative.
+      properties:
+        clientContent:
+          type: object
+          additionalProperties: true
+        toolResponse:
+          type: object
+          additionalProperties: true
       minProperties: 1
       maxProperties: 1
-      additionalProperties: true
+      additionalProperties: false
     BidiServerEvent:
       type: object
       description: >-
         A Gemini Live server message, delivered byte-for-byte. Keyed by its
-        union member; the vendor may attach a usageMetadata sibling to the
-        same message, so a frame can carry two top-level properties.
+        union member (setupComplete, serverContent, toolCall,
+        toolCallCancellation, goAway, sessionResumptionUpdate); the vendor may
+        attach a usageMetadata sibling to the same message. The frame is the
+        vendor's, so no upper property bound is published — a member Google
+        adds tomorrow is relayed verbatim, not refused by this contract.
       minProperties: 1
-      maxProperties: 2
       additionalProperties: true
     BidiSetup:
       type: object

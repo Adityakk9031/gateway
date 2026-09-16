@@ -265,6 +265,53 @@ func TestWSMessageSamplesMatchAsyncAPISchemas(t *testing.T) {
 			t.Fatalf("ws-bidi-messages.json: fixture must exercise forwardable key %q", key)
 		}
 	}
+	// Every client fixture frame must match EXACTLY ONE of the channel's
+	// published alternatives: a generic envelope that also accepted setup or
+	// realtimeInput would break consumers enforcing the oneOf contract on
+	// frames the Router itself sends. The per-key checks above pick a schema
+	// first, so they cannot see that overlap; this walks the channel instead.
+	alternatives, _ := specNode(t, doc, "channels", relayapi.BidiRoutePath, "publish", "message", "oneOf").([]any)
+	if len(alternatives) < 3 {
+		t.Fatalf("%s publish.message.oneOf = %v, want the three client alternatives", relayapi.BidiRoutePath, alternatives)
+	}
+	for i, frame := range bidiFrames {
+		var value any
+		if err := json.Unmarshal(frame, &value); err != nil {
+			t.Fatalf("ws-bidi-messages.json[%d]: %v", i, err)
+		}
+		matched := 0
+		for _, alternative := range alternatives {
+			message, err := doc.resolve(alternative.(map[string]any)["$ref"].(string))
+			if err != nil {
+				t.Fatalf("%s: %v", relayapi.BidiRoutePath, err)
+			}
+			if doc.validate(message["payload"].(map[string]any), value, "bidi client alternative") == nil {
+				matched++
+			}
+		}
+		if matched != 1 {
+			t.Fatalf("ws-bidi-messages.json[%d]: matches %d published client alternatives, want exactly one: %s", i, matched, frame)
+		}
+	}
+	// The envelope bounds are load-bearing, so the validator must enforce
+	// them: an empty object, two keys, or a key the Router owns must all fail
+	// the client envelope, and an empty object must fail the server one.
+	for _, tc := range []struct{ schema, frame string }{
+		{"BidiClientEvent", `{}`},
+		{"BidiClientEvent", `{"clientContent":{},"toolResponse":{}}`},
+		{"BidiClientEvent", `{"setup":{"model":"gemini-3.8-live"}}`},
+		{"BidiClientEvent", `{"realtimeInput":{"audioStreamEnd":true}}`},
+		{"BidiClientEvent", `{"clientContent":"turn"}`},
+		{"BidiServerEvent", `{}`},
+	} {
+		var value any
+		if err := json.Unmarshal([]byte(tc.frame), &value); err != nil {
+			t.Fatal(err)
+		}
+		if doc.validate(doc.schema(t, tc.schema), value, tc.schema) == nil {
+			t.Fatalf("%s must refuse %s", tc.schema, tc.frame)
+		}
+	}
 	// The server side has no fixture file: the frames are the vendor's, so a
 	// representative set (including the usageMetadata sibling) is held to the
 	// published envelope here, and the type-tagged schema must NOT accept them
