@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -110,6 +111,46 @@ func geminiRequest(endpoint string) runtimepkg.AdapterRequest {
 		},
 		Media:   &protocol.MediaFormat{Encoding: "pcm_s16le", SampleRateHz: 16_000, Channels: 1},
 		Options: protocol.RequestOptions{Voice: "Puck", S2S: &protocol.S2SOptions{Instructions: "Be brief.", OutputMedia: &protocol.MediaFormat{Encoding: "pcm_s16le", SampleRateHz: 24_000, Channels: 1}}},
+	}
+}
+
+// The thinking level is a MODEL property, not a caller preference: the service
+// closes the socket 1007 both ways — "must be specified" on the
+// extended-thinking model without one, "is not supported" on every other Live
+// model with one. buildSetup therefore has to decide, not forward.
+func TestThinkingLevelFollowsTheModelNotTheCaller(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name      string
+		model     string
+		requested string
+		want      any
+	}{
+		{"extended model defaults when unnamed", "models/gemini-3.8-live-extended-thinking", "", map[string]any{"thinkingLevel": "low"}},
+		{"extended model honours the caller", "models/gemini-3.8-live-extended-thinking", "high", map[string]any{"thinkingLevel": "high"}},
+		{"extended model refuses minimal, which the service rejects", "models/gemini-3.8-live-extended-thinking", "minimal", map[string]any{"thinkingLevel": "low"}},
+		{"plain live model never carries one", "models/gemini-3.8-live", "high", nil},
+		{"preview model never carries one", "models/gemini-3.1-flash-live-preview", "medium", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			options := protocol.RequestOptions{S2S: &protocol.S2SOptions{ThinkingLevel: tc.requested}}
+			setup := buildSetup(tc.model, options)["setup"].(map[string]any)
+			generation := setup["generationConfig"].(map[string]any)
+			got, present := generation["thinkingConfig"]
+			if tc.want == nil {
+				if present {
+					t.Fatalf("thinkingConfig present for %s: %v", tc.model, got)
+				}
+				return
+			}
+			if !present {
+				t.Fatalf("thinkingConfig missing for %s", tc.model)
+			}
+			if fmt.Sprint(got) != fmt.Sprint(tc.want) {
+				t.Fatalf("thinkingConfig = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 

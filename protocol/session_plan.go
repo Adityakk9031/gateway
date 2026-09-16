@@ -212,6 +212,30 @@ type S2SOptions struct {
 	// composed itself (the provider-direct path), where the adapter builds a
 	// setup document from Instructions, Voice and Temperature as before.
 	Bidi *BidiOptions `json:"bidi,omitempty"`
+	// ThinkingLevel is how much a Gemini Live model thinks before it speaks.
+	// Empty leaves the adapter's model-derived answer, which is the only safe
+	// default: the level is a property of the MODEL, not a preference.
+	// Verified against the service on 2026-09-16 —
+	// gemini-3.8-live-extended-thinking closes 1007 "Thinking level must be
+	// specified for this model" WITHOUT one, and every other Live model closes
+	// 1007 "Thinking level is not supported for this model" WITH one. So an
+	// adapter must supply it where it is mandatory and drop it everywhere
+	// else, whatever a caller asks for.
+	ThinkingLevel string `json:"thinking_level,omitempty"`
+}
+
+// ThinkingLevels a Gemini Live model accepts. MINIMAL is deliberately absent:
+// the service rejects it on the only model that takes a level at all.
+var validThinkingLevels = map[string]struct{}{"low": {}, "medium": {}, "high": {}}
+
+// ValidThinkingLevel reports whether a caller-supplied level is one the
+// service accepts. Empty is valid and means "let the adapter decide".
+func ValidThinkingLevel(level string) bool {
+	if level == "" {
+		return true
+	}
+	_, ok := validThinkingLevels[level]
+	return ok
 }
 
 // BidiOptions carries the caller's own Gemini Live setup document from the
@@ -508,6 +532,9 @@ func (o S2SOptions) validate() error {
 		if err := o.Bidi.Validate(); err != nil {
 			return fmt.Errorf("bidi: %w", err)
 		}
+	}
+	if !ValidThinkingLevel(o.ThinkingLevel) {
+		return fmt.Errorf("thinking_level: got %q, want one of low, medium, high", o.ThinkingLevel)
 	}
 	return nil
 }
