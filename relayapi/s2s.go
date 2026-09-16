@@ -84,6 +84,11 @@ type S2SSessionConfigure struct {
 	// Temperature is the sampling temperature, 0 to 2 inclusive; omitted
 	// leaves the vendor default.
 	Temperature *float64 `json:"temperature,omitempty"`
+	// ThinkingLevel asks a Gemini Live model to think harder before it speaks
+	// (low, medium, high). It reaches only the models that take one: the
+	// adapter supplies it where the service demands it and drops it where the
+	// service refuses it, so this is a request, not an instruction.
+	ThinkingLevel string `json:"thinking_level,omitempty"`
 }
 
 // Validate checks the frame tag, routing, both audio formats, the
@@ -105,7 +110,37 @@ func (c S2SSessionConfigure) Validate() error {
 	if c.Temperature != nil && (*c.Temperature < 0 || *c.Temperature > 2) {
 		return fmt.Errorf("temperature: must be between 0 and 2")
 	}
+	if !validThinkingLevel(c.ThinkingLevel) {
+		return fmt.Errorf("thinking_level: got %q, want one of low, medium, high", c.ThinkingLevel)
+	}
 	return nil
+}
+
+// ThinkingLevels are the levels a Gemini Live model can be asked for. MINIMAL
+// is absent because the service rejects it on the only model that takes a
+// level at all.
+//
+// Spelled out here rather than imported: this package deliberately depends on
+// the standard library alone (see doc.go), so it carries its own copy of the
+// set protocol.ThinkingLevels() enforces plan-side. Both are EXPORTED so
+// TestThinkingLevelsMatchProtocol can compare the sets themselves rather than
+// a hand-written sample — a value added to one side only would otherwise slip
+// through, and the edge would accept a level admission rejects.
+func ThinkingLevels() []string {
+	return []string{"low", "medium", "high"}
+}
+
+// validThinkingLevel also accepts empty, meaning "let the adapter decide".
+func validThinkingLevel(level string) bool {
+	if level == "" {
+		return true
+	}
+	for _, candidate := range ThinkingLevels() {
+		if candidate == level {
+			return true
+		}
+	}
+	return false
 }
 
 // S2SInputCommit tells the model the caller finished speaking.

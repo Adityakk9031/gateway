@@ -585,6 +585,10 @@ type VoiceSessionConfigure struct {
 	// Bidi carries the caller's Gemini Live setup document on the native
 	// /v1/bidi route. Nil on every other protocol.
 	Bidi *BidiOptions `json:"bidi,omitempty"`
+	// ThinkingLevel asks a Gemini Live model to think harder before speaking.
+	// Carried through to S2SOptions so the adapter sees what the caller asked
+	// for; the adapter still decides whether this model may have one at all.
+	ThinkingLevel string `json:"thinking_level,omitempty"`
 }
 
 // Validate checks the configure document.
@@ -603,6 +607,9 @@ func (c VoiceSessionConfigure) Validate() error {
 	}
 	if len(c.Instructions) > MaxLiveInstructionsBytes {
 		return fmt.Errorf("instructions: at most %d bytes", MaxLiveInstructionsBytes)
+	}
+	if !ValidThinkingLevel(c.ThinkingLevel) {
+		return fmt.Errorf("thinking_level: got %q, want one of %s", c.ThinkingLevel, strings.Join(ThinkingLevels(), ", "))
 	}
 	if c.Bidi != nil {
 		if c.Protocol != SpeechProtocolGoogleLiveV1 {
@@ -629,6 +636,12 @@ func (c VoiceSessionConfigure) Options() RequestOptions {
 	output := c.OutputMedia
 	return RequestOptions{
 		Voice: c.Voice,
-		S2S:   &S2SOptions{Instructions: c.Instructions, OutputMedia: &output, Live: c.Live, Bidi: c.Bidi},
+		S2S: &S2SOptions{
+			Instructions:  c.Instructions,
+			OutputMedia:   &output,
+			Live:          c.Live,
+			Bidi:          c.Bidi,
+			ThinkingLevel: c.ThinkingLevel,
+		},
 	}
 }
