@@ -27,9 +27,11 @@ const (
 	// delegation and response.event envelopes). Public route: GET /v1/live;
 	// the model rides the initial session.start frame.
 	SpeechProtocolOpenAILiveV1 SpeechProtocol = "openai.live.v1"
-	// SpeechProtocolGoogleLiveV1 is Gemini Live (BidiGenerateContent). It has
-	// no public Router route; the protocol exists so relay plans for every
-	// s2s catalog row can assert what their connector speaks.
+	// SpeechProtocolGoogleLiveV1 is Gemini Live (BidiGenerateContent), served
+	// natively on /v1/bidi. Unlike the two OpenAI protocols its frames are
+	// KEY-tagged (`{"setup":…}`, `{"realtimeInput":…}`) rather than carrying a
+	// "type" field, so it uses the BidiControl family below instead of
+	// ProviderControl.
 	SpeechProtocolGoogleLiveV1 SpeechProtocol = "google.live.v1"
 	// SpeechProtocolXAIRealtimeV1 is xAI Grok Voice, a Realtime-shaped
 	// protocol with its own session body. No public Router route.
@@ -53,6 +55,8 @@ func (p SpeechProtocol) PublicRoute() string {
 		return "/v1/realtime"
 	case SpeechProtocolOpenAILiveV1:
 		return "/v1/live"
+	case SpeechProtocolGoogleLiveV1:
+		return "/v1/bidi"
 	}
 	return ""
 }
@@ -449,10 +453,40 @@ var realtimeProviderControls = map[string]bool{
 	"output_audio_buffer.clear":  true,
 }
 
+// Gemini Live client messages the hop forwards, named by their top-level KEY.
+// `setup` is not forwardable (the hop owns it, and it is the admitted session
+// definition) and `realtimeInput` is the media path, so neither appears here.
+//
+// A key-tagged protocol cannot reuse ProviderControl: that envelope requires
+// the payload to carry a matching "type" field, and no Gemini message has one.
+// BidiControlAllowed is the parallel check, and the edge classifies frames by
+// key rather than by type tag.
+var bidiProviderControls = map[string]bool{
+	"clientContent": true,
+	"toolResponse":  true,
+}
+
+// BidiControlAllowed reports whether a Gemini Live client message key may be
+// forwarded. Unknown keys are refused rather than passed through: the vendor
+// would reject them anyway, and the caller learns at the hop instead of
+// mid-session.
+func BidiControlAllowed(key string) bool { return bidiProviderControls[key] }
+
+// BidiControlKeys lists the forwardable Gemini Live client message keys.
+func BidiControlKeys() []string {
+	keys := make([]string, 0, len(bidiProviderControls))
+	for name := range bidiProviderControls {
+		keys = append(keys, name)
+	}
+	sortStrings(keys)
+	return keys
+}
+
 // ProviderControlAllowed reports whether a native command type may be
 // forwarded on a session of the given protocol. A Realtime-only control on a
 // Live session (input_audio_buffer.commit, response.cancel) and a Live-only
-// control on a Realtime session are both refused.
+// control on a Realtime session are both refused. Gemini Live is key-tagged
+// and never answers true here — see BidiControlAllowed.
 func ProviderControlAllowed(protocol SpeechProtocol, controlType string) bool {
 	switch protocol {
 	case SpeechProtocolOpenAILiveV1:

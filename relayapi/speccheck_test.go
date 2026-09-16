@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/SpekoAI/gateway/protocol"
 	"github.com/SpekoAI/gateway/relayapi"
 )
 
@@ -224,6 +225,45 @@ func TestWSMessageSamplesMatchAsyncAPISchemas(t *testing.T) {
 			}
 		}
 	}
+
+	// Gemini Live is keyed by its single top-level field, so the type-tag loop
+	// above cannot classify it. Same contract, different tag: every frame in
+	// the fixture must match the schema its key names, and every Router-defined
+	// key must appear at least once.
+	bidiSchemaByKey := map[string]string{
+		relayapi.BidiSetupKey:         "BidiSetup",
+		relayapi.BidiRealtimeInputKey: "BidiAudioChunk",
+	}
+	var bidiFrames []json.RawMessage
+	decodeFixture(t, "ws-bidi-messages.json", &bidiFrames)
+	seenKeys := make(map[string]bool, len(bidiFrames))
+	for i, frame := range bidiFrames {
+		key, ok := relayapi.BidiMessageKey(frame)
+		if !ok {
+			t.Fatalf("ws-bidi-messages.json[%d]: frame carries no single top-level key", i)
+		}
+		seenKeys[key] = true
+		schema, defined := bidiSchemaByKey[key]
+		if !defined {
+			// clientContent and toolResponse are forwarded verbatim; their
+			// shapes belong to the vendor, so the Router defines no schema.
+			if !protocol.BidiControlAllowed(key) {
+				t.Fatalf("ws-bidi-messages.json[%d]: key %q is neither Router-defined nor forwardable", i, key)
+			}
+			continue
+		}
+		doc.validateAgainst(t, schema, frame, "ws-bidi-messages.json["+strconv.Itoa(i)+"]")
+	}
+	for key := range bidiSchemaByKey {
+		if !seenKeys[key] {
+			t.Fatalf("ws-bidi-messages.json: fixture must exercise every Router-defined key, missing %q", key)
+		}
+	}
+	for _, key := range protocol.BidiControlKeys() {
+		if !seenKeys[key] {
+			t.Fatalf("ws-bidi-messages.json: fixture must exercise forwardable key %q", key)
+		}
+	}
 }
 
 // specRef names one component schema in one spec mirror.
@@ -304,6 +344,9 @@ func wireSchemaTable() []struct {
 		{relayapi.TTSUtteranceDone{}, asyncapi("TTSUtteranceDone")},
 		{relayapi.TTSUsageUpdated{}, asyncapi("TTSUsageUpdated")},
 		{relayapi.TTSSessionClosed{}, asyncapi("TTSSessionClosed")},
+		{relayapi.BidiSetup{}, asyncapi("BidiSetup")},
+		{relayapi.BidiSetupConfig{}, asyncapi("BidiSetupConfig")},
+		{relayapi.BidiAudioChunk{}, asyncapi("BidiAudioChunk")},
 		{relayapi.LiveSessionStart{}, asyncapi("LiveSessionStart")},
 		{relayapi.LiveSessionConfig{}, asyncapi("LiveSessionConfig")},
 		{relayapi.LiveAudioConfig{}, asyncapi("LiveAudioConfig")},

@@ -7,13 +7,16 @@ import (
 	"unicode/utf8"
 )
 
-// Public speech-to-speech routes. Both sockets speak the vendor's NATIVE JSON
+// Public speech-to-speech routes. Every socket speaks the vendor's NATIVE JSON
 // event protocol: the Router authenticates, admits, meters, and forwards, but
 // it does not translate events. What the Router adds is bounded: it pins the
 // model and audio format an admitted session may use, refuses commands that
-// belong to the other protocol, and emits its own typed error frame (the
+// belong to another protocol, and emits its own typed error frame (the
 // ErrorEvent shape shared with every streaming route) when the relay — not
 // the vendor — ends a session.
+//
+// Gemini Live's route and framing live in bidi.go: it is the one protocol here
+// whose frames are keyed by their top-level field instead of a "type" tag.
 const (
 	// RealtimeRoutePath serves the OpenAI Realtime protocol. The model is an
 	// exact query parameter: GET /v1/realtime?model=gpt-realtime-2.1. The

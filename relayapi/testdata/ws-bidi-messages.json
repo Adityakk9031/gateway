@@ -1,0 +1,31 @@
+[
+  {
+    "setup": {
+      "model": "models/gemini-3.8-live",
+      "generationConfig": {"responseModalities": ["AUDIO"], "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Puck"}}}},
+      "systemInstruction": {"parts": [{"text": "Be concise. You are a support voice agent."}]},
+      "tools": [{"functionDeclarations": [{"name": "lookup_order", "parameters": {"type": "object", "properties": {"order_id": {"type": "string"}}}}]}],
+      "inputAudioTranscription": {},
+      "outputAudioTranscription": {}
+    }
+  },
+  {
+    "realtimeInput": {
+      "audio": {"data": "AAAAAA==", "mimeType": "audio/pcm;rate=16000"}
+    }
+  },
+  {
+    "realtimeInput": {"audioStreamEnd": true}
+  },
+  {
+    "clientContent": {
+      "turns": [{"role": "user", "parts": [{"text": "My order number is A0042."}]}],
+      "turnComplete": true
+    }
+  },
+  {
+    "toolResponse": {
+      "functionResponses": [{"id": "call_1", "name": "lookup_order", "response": {"status": "shipped"}}]
+    }
+  }
+]

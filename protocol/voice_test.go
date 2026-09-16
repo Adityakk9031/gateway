@@ -17,7 +17,9 @@ func TestSpeechProtocolsAndPublicRoutes(t *testing.T) {
 	}{
 		{protocol.SpeechProtocolOpenAIRealtimeV1, "/v1/realtime"},
 		{protocol.SpeechProtocolOpenAILiveV1, "/v1/live"},
-		{protocol.SpeechProtocolGoogleLiveV1, ""},
+		{protocol.SpeechProtocolGoogleLiveV1, "/v1/bidi"},
+		// xAI has a native adapter but no public route yet: its catalog rows
+		// stay out of GET /v1/models until one exists.
 		{protocol.SpeechProtocolXAIRealtimeV1, ""},
 	} {
 		if !protocol.ValidSpeechProtocol(tc.protocol) {
@@ -29,6 +31,51 @@ func TestSpeechProtocolsAndPublicRoutes(t *testing.T) {
 	}
 	if protocol.ValidSpeechProtocol("openai.realtime.v2") {
 		t.Fatal("unknown protocol accepted")
+	}
+	// Distinct paths, or a session lands on a socket speaking another framing.
+	routes := map[string]protocol.SpeechProtocol{}
+	for _, speech := range []protocol.SpeechProtocol{
+		protocol.SpeechProtocolOpenAIRealtimeV1,
+		protocol.SpeechProtocolOpenAILiveV1,
+		protocol.SpeechProtocolGoogleLiveV1,
+	} {
+		route := speech.PublicRoute()
+		if other, clash := routes[route]; clash {
+			t.Fatalf("%s and %s both serve %s", speech, other, route)
+		}
+		routes[route] = speech
+	}
+}
+
+func TestBidiControlsAreKeyTaggedAndSeparate(t *testing.T) {
+	t.Parallel()
+	// Gemini Live frames carry no "type" field, so the type-tagged allowlist
+	// must never answer for them — otherwise a Realtime control name would
+	// read as forwardable on a protocol that has no such command.
+	for _, controlType := range []string{"session.update", "response.create", "clientContent"} {
+		if protocol.ProviderControlAllowed(protocol.SpeechProtocolGoogleLiveV1, controlType) {
+			t.Fatalf("%q must not be forwardable through the type-tagged path on google.live.v1", controlType)
+		}
+	}
+	if len(protocol.ProviderControlTypes(protocol.SpeechProtocolGoogleLiveV1)) != 0 {
+		t.Fatal("google.live.v1 exposes no type-tagged controls")
+	}
+
+	for _, key := range []string{"clientContent", "toolResponse"} {
+		if !protocol.BidiControlAllowed(key) {
+			t.Fatalf("%q must be forwardable on /v1/bidi", key)
+		}
+	}
+	// setup defines the admitted session and realtimeInput is the media path;
+	// forwarding either as a control would let a caller redefine or bypass
+	// what was admitted.
+	for _, key := range []string{"setup", "realtimeInput", "serverContent", ""} {
+		if protocol.BidiControlAllowed(key) {
+			t.Fatalf("%q must not be forwardable on /v1/bidi", key)
+		}
+	}
+	if got := protocol.BidiControlKeys(); len(got) != 2 || got[0] != "clientContent" || got[1] != "toolResponse" {
+		t.Fatalf("BidiControlKeys = %v, want a sorted [clientContent toolResponse]", got)
 	}
 }
 

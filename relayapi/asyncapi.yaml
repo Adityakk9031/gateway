@@ -1,5 +1,5 @@
-# json-mirror: asyncapi.json sha256:2891382cef236e0d1ddd4f1bc7c293d76d416f109de3c9697768e3e00caea715
-# yaml-body: sha256:e5f6f6bb11d81cbd532785e80b120044a2bebc4fc4e4b932fd25cc3e1d720d6c
+# json-mirror: asyncapi.json sha256:573cb83965e6c560f18a549f50008ac021ee0ad373a14cf35004da8fad876c86
+# yaml-body: sha256:89b4866fedddb24cbee0c28ae28729d1b96facb807624d4deafe9dec5b29bec8
 #
 # This YAML document is the hand-authored, human-readable source of the
 # WebSocket contract. asyncapi.json is its checked-in JSON mirror: the same
@@ -290,6 +290,56 @@ channels:
         oneOf:
           - $ref: "#/components/messages/nativeServerEvent"
           - $ref: "#/components/messages/wsError"
+  /v1/bidi:
+    description: >-
+      Gemini Live (BidiGenerateContent) speech-to-speech, spoken natively. The
+      first text frame MUST be the vendor's setup message naming the exact
+      model (gemini-3.8-live); its exact frame bytes are the idempotency
+      content hash and the Router validates it strictly before admission —
+      unknown fields are refused. Frames on this protocol are keyed by their
+      single top-level field (setup, realtimeInput, clientContent,
+      toolResponse) rather than by a type tag, which is the one way it differs
+      from /v1/realtime and /v1/live. After setupComplete the Router relays the
+      vendor protocol: the client streams realtimeInput audio (continuous —
+      Gemini decides when to speak, there is no commit) and may forward
+      clientContent and toolResponse; every other key is refused with
+      invalid_request. The client receives every server message verbatim:
+      setupComplete, serverContent with its modelTurn audio parts and
+      input/output transcriptions, toolCall, usageMetadata, goAway, and the
+      final close. The Router pins the admitted model and mono PCM16 — 16 kHz
+      in, 24 kHz out — and its own terminal error frame (lease_expired,
+      budget_exhausted, provider_unavailable) uses the shared ErrorEvent shape;
+      vendor errors pass through unchanged.
+    bindings:
+      ws:
+        method: GET
+        headers:
+          type: object
+          properties:
+            Idempotency-Key:
+              type: string
+              minLength: 1
+              maxLength: 256
+              description: >-
+                Required on the upgrade request. The content hash covers the
+                exact setup text-frame bytes.
+          required:
+            - Idempotency-Key
+    publish:
+      operationId: sendBidiEvents
+      summary: Gemini Live client messages, forwarded to the model.
+      message:
+        oneOf:
+          - $ref: "#/components/messages/bidiSetup"
+          - $ref: "#/components/messages/bidiRealtimeInput"
+          - $ref: "#/components/messages/nativeClientEvent"
+    subscribe:
+      operationId: receiveBidiEvents
+      summary: Gemini Live server messages, plus the Router error frame.
+      message:
+        oneOf:
+          - $ref: "#/components/messages/nativeServerEvent"
+          - $ref: "#/components/messages/wsError"
 components:
   securitySchemes:
     bearerAuth:
@@ -461,6 +511,22 @@ components:
         and names the exact model.
       payload:
         $ref: "#/components/schemas/LiveSessionStart"
+    bidiSetup:
+      name: setup
+      title: Gemini Live setup
+      summary: >-
+        Opens a Gemini Live session; must be the first text frame on the
+        socket and names the exact model.
+      payload:
+        $ref: "#/components/schemas/BidiSetup"
+    bidiRealtimeInput:
+      name: realtimeInput
+      title: Gemini Live client audio
+      summary: >-
+        Base64 PCM16 audio at 16 kHz, or the end-of-audio marker. This is the
+        media path, not a forwardable control.
+      payload:
+        $ref: "#/components/schemas/BidiAudioChunk"
     nativeClientEvent:
       name: native client event
       title: Vendor client event
@@ -1210,6 +1276,96 @@ components:
       required:
         - type
       additionalProperties: true
+    BidiSetup:
+      type: object
+      description: >-
+        The first frame of a /v1/bidi session: the vendor's own setup message,
+        validated strictly by the Router. Gemini Live frames are keyed by their
+        single top-level field rather than a type tag.
+      properties:
+        setup:
+          $ref: "#/components/schemas/BidiSetupConfig"
+      required:
+        - setup
+      additionalProperties: false
+    BidiSetupConfig:
+      type: object
+      description: >-
+        The setup object of a /v1/bidi session. model is the exact Gemini Live
+        model id, with or without the vendor's "models/" prefix. Every other
+        field is a vendor document the Router bounds but never rewrites.
+      properties:
+        model:
+          type: string
+          minLength: 1
+          maxLength: 136
+        generationConfig:
+          type: object
+          description: responseModalities and speechConfig, forwarded verbatim.
+        systemInstruction:
+          type: object
+          description: Instruction parts steering the live model.
+        tools:
+          type: array
+          maxItems: 64
+          items:
+            type: object
+            description: One vendor tool declaration, forwarded verbatim.
+        sessionResumption:
+          type: object
+          description: Vendor session-resumption settings.
+        contextWindowCompression:
+          type: object
+          description: Vendor context-window compression settings.
+        inputAudioTranscription:
+          type: object
+          description: Enables the vendor's transcript of the caller.
+        outputAudioTranscription:
+          type: object
+          description: Enables the vendor's transcript of the model.
+        realtimeInputConfig:
+          type: object
+          description: Vendor-side VAD and turn-handling settings.
+      required:
+        - model
+      additionalProperties: false
+    BidiAudioChunk:
+      type: object
+      description: >-
+        Client audio for a /v1/bidi session. Both the current `audio` field and
+        the older `mediaChunks` array are accepted because the vendor's own
+        SDKs still emit the latter. `audioStreamEnd` marks the end of input
+        audio.
+      properties:
+        realtimeInput:
+          type: object
+          properties:
+            audio:
+              type: object
+              properties:
+                data:
+                  type: string
+                  contentEncoding: base64
+                mimeType:
+                  type: string
+              required:
+                - data
+            mediaChunks:
+              type: array
+              items:
+                type: object
+                properties:
+                  data:
+                    type: string
+                    contentEncoding: base64
+                  mimeType:
+                    type: string
+                required:
+                  - data
+            audioStreamEnd:
+              type: boolean
+      required:
+        - realtimeInput
     LiveSessionStart:
       type: object
       description: >-
