@@ -1,10 +1,37 @@
 package relayapi_test
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/SpekoAI/gateway/relayapi"
 )
+
+func TestModelCapabilitiesMissingStreamingDefaultsFalse(t *testing.T) {
+	t.Parallel()
+	var capabilities relayapi.ModelCapabilities
+	if err := json.Unmarshal([]byte(`{"tools":true}`), &capabilities); err != nil {
+		t.Fatal(err)
+	}
+	if capabilities.Streaming {
+		t.Fatal("an older response without streaming must decode conservatively as false")
+	}
+}
+
+func TestModelCapabilitiesSerializesStreamingFalse(t *testing.T) {
+	t.Parallel()
+	payload, err := json.Marshal(relayapi.ModelCapabilities{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := fields["streaming"]; !ok || string(got) != "false" {
+		t.Fatalf("streaming field = %s, present=%v; want explicit false", got, ok)
+	}
+}
 
 func TestModelsResponseRejectsEachRuleViolation(t *testing.T) {
 	t.Parallel()

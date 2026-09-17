@@ -196,7 +196,10 @@ model, and — for GPT-Live only — `live` with seeded `history` and the
 
 The model selects the protocol. `gpt-realtime-*` models resolve to the
 `openai.realtime.v1` adapter (OpenAI Realtime on `wss://api.openai.com/v1/realtime`,
-24 kHz mono PCM16, server VAD, `audio.commit` marks the turn). `gpt-live-1`
+24 kHz mono PCM16, server VAD, `audio.commit` marks the turn). Versioned
+`grok-voice-*` models resolve to `xai.realtime.v1` on
+`wss://api.x.ai/v1/realtime`, preserving xAI's top-level `voice` and
+`turn_detection` session fields. `gpt-live-1`
 resolves to `openai.live.v1` (GPT-Live on `wss://api.openai.com/v1/live/sessions`,
 matching mono PCM16 at 16 or 24 kHz in both directions, `marin` by default).
 `provider: "openai"` with `model: "auto"` stays on Realtime: GPT-Live is

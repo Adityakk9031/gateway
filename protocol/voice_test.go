@@ -18,9 +18,7 @@ func TestSpeechProtocolsAndPublicRoutes(t *testing.T) {
 		{protocol.SpeechProtocolOpenAIRealtimeV1, "/v1/realtime"},
 		{protocol.SpeechProtocolOpenAILiveV1, "/v1/live"},
 		{protocol.SpeechProtocolGoogleLiveV1, "/v1/bidi"},
-		// xAI has a native adapter but no public route yet: its catalog rows
-		// stay out of GET /v1/models until one exists.
-		{protocol.SpeechProtocolXAIRealtimeV1, ""},
+		{protocol.SpeechProtocolXAIRealtimeV1, "/v1/realtime"},
 	} {
 		if !protocol.ValidSpeechProtocol(tc.protocol) {
 			t.Fatalf("%s must be valid", tc.protocol)
@@ -32,18 +30,10 @@ func TestSpeechProtocolsAndPublicRoutes(t *testing.T) {
 	if protocol.ValidSpeechProtocol("openai.realtime.v2") {
 		t.Fatal("unknown protocol accepted")
 	}
-	// Distinct paths, or a session lands on a socket speaking another framing.
-	routes := map[string]protocol.SpeechProtocol{}
-	for _, speech := range []protocol.SpeechProtocol{
-		protocol.SpeechProtocolOpenAIRealtimeV1,
-		protocol.SpeechProtocolOpenAILiveV1,
-		protocol.SpeechProtocolGoogleLiveV1,
-	} {
-		route := speech.PublicRoute()
-		if other, clash := routes[route]; clash {
-			t.Fatalf("%s and %s both serve %s", speech, other, route)
-		}
-		routes[route] = speech
+	// OpenAI and xAI deliberately share /v1/realtime. The exact model id
+	// selects the protocol before the session configuration is built.
+	if protocol.SpeechProtocolOpenAIRealtimeV1.PublicRoute() != protocol.SpeechProtocolXAIRealtimeV1.PublicRoute() {
+		t.Fatal("realtime-shaped protocols must share /v1/realtime")
 	}
 }
 

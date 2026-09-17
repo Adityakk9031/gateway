@@ -1,5 +1,5 @@
-# json-mirror: openapi.json sha256:f9da87308066136b294f79ac96c4cd9477e9ba7a3bdfb108ca73eefd78fc0ea2
-# yaml-body: sha256:8e7c4ef9bb61d61875df4600376191b4d21b8e2db42d458fa0216ffdc2d9b55f
+# json-mirror: openapi.json sha256:54d1b706dca1eefd7ff7c2f49de6173643f67e55b920cda7edbc97b4dd0d9daa
+# yaml-body: sha256:db4201a45e0551c264bcb55415c215d7095383b96dbfea5ed331ace85d939c70
 #
 # This YAML document is the hand-authored, human-readable source of the HTTP
 # contract. openapi.json is its checked-in JSON mirror: the same document,
@@ -84,8 +84,9 @@ paths:
         release-pinned catalog that produced the listing so support can
         correlate a caller's view with an exact release. The listing is
         advisory: admission remains the enforcement point for access gates
-        and credit. Optional language, objective, and path parameters select
-        the exact benchmark projection used to order and annotate the rows.
+        and credit. By default the response includes every public model. The
+        optional language, objective, and path parameters select the exact
+        benchmark projection used to order and annotate the rows.
       parameters:
         - name: language
           in: query
@@ -101,10 +102,13 @@ paths:
             enum: [quality, balanced, latency, cost]
         - name: path
           in: query
-          description: Speech transport projection; streaming is an alias for stream.
+          description: >-
+            Catalog projection. Defaults to all; streaming is an alias for
+            stream. Stream includes only models whose capabilities.streaming
+            is true. Batch preserves the prerecorded STT projection.
           schema:
             type: string
-            enum: [stream, streaming, batch]
+            enum: [all, stream, streaming, batch]
       responses:
         "200":
           description: The caller's slice of the catalog.
@@ -665,6 +669,14 @@ components:
         those asks fail closed; per-provider settings are deliberately not
         advertised here, being vendor-specific rather than portable.
       properties:
+        streaming:
+          type: boolean
+          description: >-
+            Supports the kind's public streaming operation: live audio
+            processing on /v1/stt/stream, incremental text/audio sessions on
+            /v1/tts/stream, streamed output on /v1/llm/responses, or
+            bidirectional realtime audio on the S2S endpoint. A one-shot HTTP
+            response whose body happens to be chunked does not make this true.
         tools:
           type: boolean
         structured_output:
@@ -706,6 +718,7 @@ components:
             characters into words, because only the caller knows where the
             words are in the text it sent.
       required:
+        - streaming
         - tools
         - structured_output
         - cached_input
@@ -763,12 +776,12 @@ components:
             is refused with capability_unsupported.
         protocol:
           type: string
-          enum: [openai.realtime.v1, openai.live.v1, google.live.v1]
+          enum: [openai.realtime.v1, xai.realtime.v1, openai.live.v1, google.live.v1]
           description: >-
             The native event protocol the S2S route speaks; omitted for every
             other kind. It also tells a client how to frame its messages: the
-            two OpenAI protocols tag every message by "type", google.live.v1
-            by its single top-level key.
+            OpenAI, xAI, and GPT-Live protocols tag every message by "type";
+            google.live.v1 uses its single top-level key.
         benchmark:
           $ref: "#/components/schemas/ModelBenchmark"
       required:
@@ -865,7 +878,7 @@ components:
           enum: [quality, balanced, latency, cost]
         path:
           type: string
-          enum: [stream, batch]
+          enum: [all, stream, batch]
       required:
         - schema
         - source

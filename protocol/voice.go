@@ -13,7 +13,8 @@ import (
 // wss://api.openai.com/v1/realtime, while gpt-live-1 speaks the Live protocol
 // on wss://api.openai.com/v1/live/sessions. Catalog rows carry the protocol,
 // signed relay plans assert it, connectors verify it before touching a
-// credential, and the Router exposes the OpenAI protocols and Gemini Live
+// credential, and the Router exposes the realtime-shaped protocols, GPT-Live,
+// and Gemini Live
 // natively on their own public routes (/v1/realtime, /v1/live, /v1/bidi).
 type SpeechProtocol string
 
@@ -34,7 +35,8 @@ const (
 	// ProviderControl.
 	SpeechProtocolGoogleLiveV1 SpeechProtocol = "google.live.v1"
 	// SpeechProtocolXAIRealtimeV1 is xAI Grok Voice, a Realtime-shaped
-	// protocol with its own session body. No public Router route.
+	// protocol with its own session body. Public route: GET
+	// /v1/realtime?model=<id>; the exact model selects this protocol.
 	SpeechProtocolXAIRealtimeV1 SpeechProtocol = "xai.realtime.v1"
 )
 
@@ -51,7 +53,7 @@ func ValidSpeechProtocol(p SpeechProtocol) bool {
 // natively, or "" for protocols the Router does not expose.
 func (p SpeechProtocol) PublicRoute() string {
 	switch p {
-	case SpeechProtocolOpenAIRealtimeV1:
+	case SpeechProtocolOpenAIRealtimeV1, SpeechProtocolXAIRealtimeV1:
 		return "/v1/realtime"
 	case SpeechProtocolOpenAILiveV1:
 		return "/v1/live"
