@@ -112,3 +112,38 @@ async def test_voice_router_discards_superseded_turn_and_bounds_work():
     await asyncio.gather(first, second)
     assert spoken == ["llm:second"]
     assert evaluator.max_active == 1
+
+
+async def test_voice_router_discards_handler_result_from_superseded_turn():
+    spoken: list[str] = []
+    handler_started = asyncio.Event()
+    release_handler = asyncio.Event()
+
+    async def normal(transcript: str, _: dict[str, Any]) -> str:
+        return f"llm:{transcript}"
+
+    async def handoff(_: str, __: dict[str, Any]) -> str:
+        return "human"
+
+    async def slow_status(_: str, __: dict[str, Any]) -> str:
+        handler_started.set()
+        await release_handler.wait()
+        return "stale status"
+
+    async def speak(text: str) -> None:
+        spoken.append(text)
+
+    router = VoiceTurnRouter(
+        Evaluator([_response(), _response(choice="other")]),
+        normal_llm=normal,
+        human_handoff=handoff,
+        speak=speak,
+        read_only_handlers={"order_status": slow_status},
+    )
+    first = asyncio.create_task(router.on_final_transcript("first", {}))
+    await handler_started.wait()
+    await router.on_final_transcript("second", {})
+    release_handler.set()
+    await first
+
+    assert spoken == ["llm:second"]

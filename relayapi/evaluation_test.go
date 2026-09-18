@@ -65,7 +65,7 @@ func TestEvaluationResponseAllowsSemanticallyEquivalentStructuredLegend(t *testi
 		Questions: map[string]EvaluationQuestion{
 			"frustration": {
 				Type: EvaluationQuestionScore, Instructions: raw(`"Rate frustration"`),
-				Criteria: raw(`[{"label":"calm","severity":0},{"label":"angry","severity":1}]`),
+				Criteria: raw(`[{"label":"calm","severity":0},{"label":"angry","severity":1.0}]`),
 			},
 		},
 	}
@@ -78,8 +78,8 @@ func TestEvaluationResponseAllowsSemanticallyEquivalentStructuredLegend(t *testi
 				Type: EvaluationQuestionScore, Score: &score, Confidence: &confidence,
 				Probabilities: map[string]float64{"0": 0.1, "1": 0.9},
 				Legend: map[string]json.RawMessage{
-					"0": raw(`{ "severity": 0, "label": "calm" }`),
-					"1": raw(`{"severity":1,"label":"angry"}`),
+					"0": raw(`{ "severity": 0e4, "label": "calm" }`),
+					"1": raw(`{"severity":1e0,"label":"angry"}`),
 				},
 			},
 		},

@@ -258,6 +258,16 @@ func (m Model) Validate() error {
 		if len(m.Capabilities.EvaluationQuestionTypes) == 0 {
 			return fmt.Errorf("evaluation_question_types: required for evaluation models")
 		}
+		seenQuestionTypes := make(map[string]struct{}, len(m.Capabilities.EvaluationQuestionTypes))
+		for _, questionType := range m.Capabilities.EvaluationQuestionTypes {
+			if questionType != EvaluationQuestionChoice && questionType != EvaluationQuestionScore && questionType != EvaluationQuestionNoul {
+				return fmt.Errorf("evaluation_question_types: unsupported value %q", questionType)
+			}
+			if _, duplicate := seenQuestionTypes[questionType]; duplicate {
+				return fmt.Errorf("evaluation_question_types: duplicate value %q", questionType)
+			}
+			seenQuestionTypes[questionType] = struct{}{}
+		}
 	} else if len(m.Capabilities.EvaluationQuestionTypes) != 0 {
 		return fmt.Errorf("evaluation_question_types: valid only for evaluation models")
 	}

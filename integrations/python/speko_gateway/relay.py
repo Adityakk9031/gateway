@@ -12,7 +12,7 @@ import json
 import os
 import uuid
 from collections.abc import AsyncIterator
-from typing import Any, Literal, NotRequired, TypedDict
+from typing import Any, Literal, TypedDict
 
 import aiohttp
 
@@ -44,10 +44,13 @@ class RelayError(RuntimeError):
 JSONValue = str | int | float | bool | None | list["JSONValue"] | dict[str, "JSONValue"]
 
 
-class EvaluationQuestion(TypedDict):
+class _RequiredEvaluationQuestion(TypedDict):
     type: Literal["noul", "choice", "score"]
     instructions: JSONValue
-    criteria: NotRequired[JSONValue]
+
+
+class EvaluationQuestion(_RequiredEvaluationQuestion, total=False):
+    criteria: JSONValue
 
 
 class EvaluationAnswer(TypedDict, total=False):

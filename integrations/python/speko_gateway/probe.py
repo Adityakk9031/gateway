@@ -266,7 +266,8 @@ class ConversationProbe:
         """Bind a provider leg's identity to the open turn.
 
         Linkage is explicit, never inferred: STT/TTS legs carry the Gateway
-        session/attempt identifiers, the LLM leg carries the relay request ID.
+        session/attempt identifiers, and hosted Router legs carry the relay
+        request ID.
         """
 
         if self._turn_id is None:
@@ -277,7 +278,7 @@ class ConversationProbe:
                 return
             data["session_id"] = str(session_id)
             data["attempt_id"] = str(attempt_id)
-        elif kind == "llm":
+        elif kind in ("llm", "evaluation"):
             if not request_id:
                 return
             data["request_id"] = str(request_id)

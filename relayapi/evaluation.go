@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"math/big"
 	"reflect"
 	"strings"
 )
@@ -185,7 +186,45 @@ func evaluationJSONEqual(left, right json.RawMessage) bool {
 	}
 	leftValue, leftErr := decode(left)
 	rightValue, rightErr := decode(right)
-	return leftErr == nil && rightErr == nil && reflect.DeepEqual(leftValue, rightValue)
+	return leftErr == nil && rightErr == nil && evaluationValueEqual(leftValue, rightValue)
+}
+
+func evaluationValueEqual(left, right any) bool {
+	switch typedLeft := left.(type) {
+	case json.Number:
+		typedRight, ok := right.(json.Number)
+		if !ok {
+			return false
+		}
+		leftNumber, leftOK := new(big.Rat).SetString(typedLeft.String())
+		rightNumber, rightOK := new(big.Rat).SetString(typedRight.String())
+		return leftOK && rightOK && leftNumber.Cmp(rightNumber) == 0
+	case []any:
+		typedRight, ok := right.([]any)
+		if !ok || len(typedLeft) != len(typedRight) {
+			return false
+		}
+		for index := range typedLeft {
+			if !evaluationValueEqual(typedLeft[index], typedRight[index]) {
+				return false
+			}
+		}
+		return true
+	case map[string]any:
+		typedRight, ok := right.(map[string]any)
+		if !ok || len(typedLeft) != len(typedRight) {
+			return false
+		}
+		for key, value := range typedLeft {
+			rightValue, present := typedRight[key]
+			if !present || !evaluationValueEqual(value, rightValue) {
+				return false
+			}
+		}
+		return true
+	default:
+		return reflect.DeepEqual(left, right)
+	}
 }
 
 // ValidateFor proves that an upstream response answers exactly the questions

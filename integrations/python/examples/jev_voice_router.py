@@ -116,16 +116,17 @@ class VoiceTurnRouter:
             )
             self._in_flight = task
         try:
-            async with asyncio.timeout(self._deadline):
-                evaluation = await task
+            evaluation = await asyncio.wait_for(task, timeout=self._deadline)
         except asyncio.CancelledError:
             if turn != self._turn:
                 return
             raise
-        except (TimeoutError, ClientError, RelayError):
+        except (asyncio.TimeoutError, ClientError, RelayError):
             if turn != self._turn:
                 return
-            await self._speak(await self._normal_llm(transcript, relevant_state))
+            reply = await self._normal_llm(transcript, relevant_state)
+            if turn == self._turn:
+                await self._speak(reply)
             return
         if turn != self._turn:
             return
@@ -133,7 +134,9 @@ class VoiceTurnRouter:
         answers = evaluation["answers"]
         handoff = answers.get("handoff_requested", {})
         if float(handoff.get("noul", 0.0)) >= HANDOFF_THRESHOLD:
-            await self._speak(await self._human_handoff(transcript, relevant_state))
+            reply = await self._human_handoff(transcript, relevant_state)
+            if turn == self._turn:
+                await self._speak(reply)
             return
 
         intent = answers.get("intent", {})
@@ -150,9 +153,13 @@ class VoiceTurnRouter:
         ):
             # Only an allowlisted read-only handler can be dispatched here.
             # Calculations and authorization for side effects stay in code.
-            await self._speak(await handler(transcript, relevant_state))
+            reply = await handler(transcript, relevant_state)
+            if turn == self._turn:
+                await self._speak(reply)
             return
-        await self._speak(await self._normal_llm(transcript, relevant_state))
+        reply = await self._normal_llm(transcript, relevant_state)
+        if turn == self._turn:
+            await self._speak(reply)
 
 
 async def fake_evaluation(request: web.Request) -> web.Response:

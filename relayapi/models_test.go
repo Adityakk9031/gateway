@@ -33,6 +33,33 @@ func TestModelCapabilitiesSerializesStreamingFalse(t *testing.T) {
 	}
 }
 
+func TestEvaluationModelRejectsUnknownOrDuplicateQuestionTypes(t *testing.T) {
+	t.Parallel()
+	model := relayapi.Model{
+		ID:       "typesafe:jev-1.13.0",
+		Provider: "typesafe",
+		Kind:     relayapi.KindEvaluation,
+		Capabilities: relayapi.ModelCapabilities{
+			EvaluationQuestionTypes: []string{
+				relayapi.EvaluationQuestionChoice,
+				relayapi.EvaluationQuestionScore,
+				relayapi.EvaluationQuestionNoul,
+			},
+		},
+		Regions: []string{"us-east-1"},
+	}
+	if err := model.Validate(); err != nil {
+		t.Fatalf("valid evaluation model: %v", err)
+	}
+	model.Capabilities.EvaluationQuestionTypes = []string{"bogus"}
+	assertInvalid(t, model.Validate(), "unsupported value")
+	model.Capabilities.EvaluationQuestionTypes = []string{
+		relayapi.EvaluationQuestionChoice,
+		relayapi.EvaluationQuestionChoice,
+	}
+	assertInvalid(t, model.Validate(), "duplicate value")
+}
+
 func TestModelsResponseRejectsEachRuleViolation(t *testing.T) {
 	t.Parallel()
 
