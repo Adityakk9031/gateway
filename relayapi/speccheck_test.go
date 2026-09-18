@@ -112,6 +112,8 @@ func TestHTTPFixturesMatchOpenAPISchemas(t *testing.T) {
 		{"llm-request-tools.json", "LLMRequest"},
 		{"llm-request-structured.json", "LLMRequest"},
 		{"llm-response.json", "LLMResponse"},
+		{"evaluation-request.json", "EvaluationRequest"},
+		{"evaluation-response.json", "EvaluationResponse"},
 	} {
 		doc.validateAgainst(t, tc.schema, readFixture(t, tc.fixture), tc.fixture)
 	}
@@ -385,6 +387,10 @@ func wireSchemaTable() []struct {
 		{relayapi.ResponseFormat{}, openapi("ResponseFormat")},
 		{relayapi.LLMRequest{}, openapi("LLMRequest")},
 		{relayapi.LLMResponse{}, openapi("LLMResponse")},
+		{relayapi.EvaluationRequest{}, openapi("EvaluationRequest")},
+		{relayapi.EvaluationQuestion{}, openapi("EvaluationQuestion")},
+		{relayapi.EvaluationAnswer{}, openapi("EvaluationAnswer")},
+		{relayapi.EvaluationResponse{}, openapi("EvaluationResponse")},
 		{relayapi.ResponseCreated{}, openapi("ResponseCreated")},
 		{relayapi.ResponseItemAdded{}, openapi("ResponseItemAdded")},
 		{relayapi.ResponseTextDelta{}, openapi("ResponseTextDelta")},

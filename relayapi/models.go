@@ -13,10 +13,11 @@ import (
 type Kind string
 
 const (
-	KindSTT Kind = "stt"
-	KindTTS Kind = "tts"
-	KindLLM Kind = "llm"
-	KindS2S Kind = "s2s"
+	KindSTT        Kind = "stt"
+	KindTTS        Kind = "tts"
+	KindLLM        Kind = "llm"
+	KindS2S        Kind = "s2s"
+	KindEvaluation Kind = "evaluation"
 )
 
 // ModelCapabilities advertises what a model supports. Capability gating
@@ -44,8 +45,9 @@ type ModelCapabilities struct {
 	// They are separate bits rather than one enum because a model may report
 	// both, and neither is derived from the other: the relay never groups
 	// characters into words on the caller's behalf.
-	WordTimings      bool `json:"word_timings"`
-	CharacterTimings bool `json:"character_timings"`
+	WordTimings             bool     `json:"word_timings"`
+	CharacterTimings        bool     `json:"character_timings"`
+	EvaluationQuestionTypes []string `json:"evaluation_question_types,omitempty"`
 }
 
 // SampleRateRange is an inclusive set of sample rates accepted by one audio
@@ -217,8 +219,8 @@ func (m Model) Validate() error {
 			return fmt.Errorf("regions[%d]: region id must not be blank", i)
 		}
 	}
-	if m.Kind == KindLLM && len(m.AudioFormats) != 0 {
-		return fmt.Errorf("audio_formats: must be omitted for llm models")
+	if (m.Kind == KindLLM || m.Kind == KindEvaluation) && len(m.AudioFormats) != 0 {
+		return fmt.Errorf("audio_formats: must be omitted for non-speech models")
 	}
 	if (m.Kind == KindSTT || m.Kind == KindTTS || m.Kind == KindS2S) && len(m.AudioFormats) == 0 {
 		return fmt.Errorf("audio_formats: at least one format is required for speech models")
@@ -248,6 +250,16 @@ func (m Model) Validate() error {
 		if m.Endpoint != "" || m.Protocol != "" {
 			return fmt.Errorf("endpoint and protocol: valid only for s2s models")
 		}
+	}
+	if m.Kind == KindEvaluation {
+		if m.Capabilities.Streaming {
+			return fmt.Errorf("streaming: evaluation models are non-streaming")
+		}
+		if len(m.Capabilities.EvaluationQuestionTypes) == 0 {
+			return fmt.Errorf("evaluation_question_types: required for evaluation models")
+		}
+	} else if len(m.Capabilities.EvaluationQuestionTypes) != 0 {
+		return fmt.Errorf("evaluation_question_types: valid only for evaluation models")
 	}
 	for i, format := range m.OutputAudioFormats {
 		if err := format.Validate(); err != nil {
@@ -281,5 +293,5 @@ func (m ModelsResponse) Validate() error {
 }
 
 func validKind(v Kind) bool {
-	return v == KindSTT || v == KindTTS || v == KindLLM || v == KindS2S
+	return v == KindSTT || v == KindTTS || v == KindLLM || v == KindS2S || v == KindEvaluation
 }

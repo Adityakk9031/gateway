@@ -28,10 +28,14 @@ const (
 type SessionKind string
 
 const (
-	SessionKindSTT      SessionKind = "stt"
-	SessionKindTTS      SessionKind = "tts"
-	SessionKindLLM      SessionKind = "llm"
-	SessionKindRealtime SessionKind = "realtime"
+	SessionKindSTT SessionKind = "stt"
+	SessionKindTTS SessionKind = "tts"
+	SessionKindLLM SessionKind = "llm"
+	// SessionKindEvaluation is a hosted Router-only typed decision request.
+	// It is accepted by relay plans and deliberately rejected by revision-3
+	// provider-direct session plans.
+	SessionKindEvaluation SessionKind = "evaluation"
+	SessionKindRealtime   SessionKind = "realtime"
 	// SessionKindS2S is a reserved legacy wire value with no public Relay route.
 	// New speech-to-speech sessions use SessionKindRealtime and execute in the
 	// customer-side gateway with a provider-direct SessionPlan.

@@ -52,10 +52,11 @@ const (
 type RelayBudgetGroup string
 
 const (
-	RelayBudgetGroupSTTDuration   RelayBudgetGroup = "stt_duration"
-	RelayBudgetGroupTTSCharacters RelayBudgetGroup = "tts_characters"
-	RelayBudgetGroupLLMInput      RelayBudgetGroup = "llm_input"
-	RelayBudgetGroupLLMOutput     RelayBudgetGroup = "llm_output"
+	RelayBudgetGroupSTTDuration     RelayBudgetGroup = "stt_duration"
+	RelayBudgetGroupTTSCharacters   RelayBudgetGroup = "tts_characters"
+	RelayBudgetGroupLLMInput        RelayBudgetGroup = "llm_input"
+	RelayBudgetGroupLLMOutput       RelayBudgetGroup = "llm_output"
+	RelayBudgetGroupEvaluationInput RelayBudgetGroup = "evaluation_input"
 	// RelayBudgetGroupS2SDuration authorizes connected seconds of a
 	// speech-to-speech session, denominated in duration_seconds like STT. The
 	// session is metered by wall clock from provider connect to close: vendor
@@ -390,6 +391,9 @@ func validateRelayBudgets(kind SessionKind, budgets []RelayBudget) error {
 	if kind == SessionKindLLM && (!seen[RelayBudgetGroupLLMInput] || !seen[RelayBudgetGroupLLMOutput]) {
 		return fmt.Errorf("llm plans require both llm_input and llm_output groups")
 	}
+	if kind == SessionKindEvaluation && !seen[RelayBudgetGroupEvaluationInput] {
+		return fmt.Errorf("evaluation plans require the evaluation_input group")
+	}
 	if kind == SessionKindS2S {
 		if !seen[RelayBudgetGroupS2SDuration] {
 			return fmt.Errorf("s2s plans require the s2s_duration group")
@@ -418,13 +422,14 @@ func validateCatalogDigest(digest string) error {
 }
 
 func validRelayKind(v SessionKind) bool {
-	return v == SessionKindSTT || v == SessionKindTTS || v == SessionKindLLM || v == SessionKindS2S
+	return v == SessionKindSTT || v == SessionKindTTS || v == SessionKindLLM || v == SessionKindS2S || v == SessionKindEvaluation
 }
 
 func validRelayBudgetGroup(v RelayBudgetGroup) bool {
 	switch v {
 	case RelayBudgetGroupSTTDuration, RelayBudgetGroupTTSCharacters, RelayBudgetGroupLLMInput, RelayBudgetGroupLLMOutput,
-		RelayBudgetGroupS2SDuration, RelayBudgetGroupBackendInput, RelayBudgetGroupBackendOutput, RelayBudgetGroupBackendTools:
+		RelayBudgetGroupS2SDuration, RelayBudgetGroupBackendInput, RelayBudgetGroupBackendOutput, RelayBudgetGroupBackendTools,
+		RelayBudgetGroupEvaluationInput:
 		return true
 	}
 	return false
@@ -441,6 +446,8 @@ func relayBudgetGroupLegalForKind(kind SessionKind, group RelayBudgetGroup) bool
 	case SessionKindS2S:
 		return group == RelayBudgetGroupS2SDuration || group == RelayBudgetGroupBackendInput ||
 			group == RelayBudgetGroupBackendOutput || group == RelayBudgetGroupBackendTools
+	case SessionKindEvaluation:
+		return group == RelayBudgetGroupEvaluationInput
 	}
 	return false
 }
