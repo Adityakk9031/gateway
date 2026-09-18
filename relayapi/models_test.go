@@ -1,10 +1,64 @@
 package relayapi_test
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/SpekoAI/gateway/relayapi"
 )
+
+func TestModelCapabilitiesMissingStreamingDefaultsFalse(t *testing.T) {
+	t.Parallel()
+	var capabilities relayapi.ModelCapabilities
+	if err := json.Unmarshal([]byte(`{"tools":true}`), &capabilities); err != nil {
+		t.Fatal(err)
+	}
+	if capabilities.Streaming {
+		t.Fatal("an older response without streaming must decode conservatively as false")
+	}
+}
+
+func TestModelCapabilitiesSerializesStreamingFalse(t *testing.T) {
+	t.Parallel()
+	payload, err := json.Marshal(relayapi.ModelCapabilities{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := fields["streaming"]; !ok || string(got) != "false" {
+		t.Fatalf("streaming field = %s, present=%v; want explicit false", got, ok)
+	}
+}
+
+func TestEvaluationModelRejectsUnknownOrDuplicateQuestionTypes(t *testing.T) {
+	t.Parallel()
+	model := relayapi.Model{
+		ID:       "typesafe:jev-1.13.0",
+		Provider: "typesafe",
+		Kind:     relayapi.KindEvaluation,
+		Capabilities: relayapi.ModelCapabilities{
+			EvaluationQuestionTypes: []string{
+				relayapi.EvaluationQuestionChoice,
+				relayapi.EvaluationQuestionScore,
+				relayapi.EvaluationQuestionNoul,
+			},
+		},
+		Regions: []string{"us-east-1"},
+	}
+	if err := model.Validate(); err != nil {
+		t.Fatalf("valid evaluation model: %v", err)
+	}
+	model.Capabilities.EvaluationQuestionTypes = []string{"bogus"}
+	assertInvalid(t, model.Validate(), "unsupported value")
+	model.Capabilities.EvaluationQuestionTypes = []string{
+		relayapi.EvaluationQuestionChoice,
+		relayapi.EvaluationQuestionChoice,
+	}
+	assertInvalid(t, model.Validate(), "duplicate value")
+}
 
 func TestModelsResponseRejectsEachRuleViolation(t *testing.T) {
 	t.Parallel()

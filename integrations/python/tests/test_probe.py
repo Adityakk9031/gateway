@@ -296,6 +296,7 @@ async def test_registry_hooks_attach_legs_and_markers_to_open_turn() -> None:
     report_leg("stt", session_id="sess-1", attempt_id="att-1", provider="deepgram")
     report_leg("tts", session_id="sess-2", attempt_id="att-2", model="sonic-2")
     report_leg("llm", request_id="req-9")
+    report_leg("evaluation", request_id="req-eval-1", provider="typesafe")
     report_leg("stt", session_id="", attempt_id="")  # incomplete: dropped
     report_leg("smtp", request_id="req-9")  # unknown kind: dropped
     report_marker("llm.requested")
@@ -307,7 +308,7 @@ async def test_registry_hooks_attach_legs_and_markers_to_open_turn() -> None:
 
     events = posted(client)
     legs = [event for event in events if event["type"] == "leg.attached"]
-    assert len(legs) == 3
+    assert len(legs) == 4
     assert legs[0]["data"] == {
         "mono_ms": legs[0]["data"]["mono_ms"],
         "kind": "stt",
@@ -320,6 +321,12 @@ async def test_registry_hooks_attach_legs_and_markers_to_open_turn() -> None:
         "mono_ms": legs[2]["data"]["mono_ms"],
         "kind": "llm",
         "request_id": "req-9",
+    }
+    assert legs[3]["data"] == {
+        "mono_ms": legs[3]["data"]["mono_ms"],
+        "kind": "evaluation",
+        "request_id": "req-eval-1",
+        "provider": "typesafe",
     }
     markers = [event["type"] for event in events]
     assert markers.count("llm.requested") == 1
@@ -552,6 +559,29 @@ async def test_relay_reports_llm_leg_from_response_header() -> None:
         "mono_ms": legs[0]["data"]["mono_ms"],
         "kind": "llm",
         "request_id": "req-relay-1",
+    }
+
+
+async def test_relay_reports_evaluation_leg_from_response_header() -> None:
+    from speko_gateway.relay import _report_evaluation_leg
+
+    probe, session, client = new_probe()
+    probe.start()
+    user_state(session, "listening", "speaking")
+
+    _report_evaluation_leg(
+        SimpleNamespace(headers={"Speko-Request-ID": "req-evaluation-1"}),
+        probe,
+        probe.current_turn_id,
+    )  # type: ignore[arg-type]
+    await probe.aclose()
+
+    legs = [event for event in posted(client) if event["type"] == "leg.attached"]
+    assert len(legs) == 1
+    assert legs[0]["data"] == {
+        "mono_ms": legs[0]["data"]["mono_ms"],
+        "kind": "evaluation",
+        "request_id": "req-evaluation-1",
     }
 
 

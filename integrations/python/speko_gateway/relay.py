@@ -12,12 +12,13 @@ import json
 import os
 import uuid
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, Literal, TypedDict
 
 import aiohttp
 
 from ._user_agent import USER_AGENT
 from .client import _env_secret
+from .probe import ConversationProbe, active_probe
 from .probe import report_leg as _report_probe_leg
 
 _DEFAULT_RELAY_URL = "https://router.speko.dev"
@@ -39,6 +40,118 @@ class RelayError(RuntimeError):
         self.code = code
         self.retryable = retryable
         self.request_id = request_id
+
+
+JSONValue = str | int | float | bool | None | list["JSONValue"] | dict[str, "JSONValue"]
+
+
+class _RequiredEvaluationQuestion(TypedDict):
+    type: Literal["noul", "choice", "score"]
+    instructions: JSONValue
+
+
+class EvaluationQuestion(_RequiredEvaluationQuestion, total=False):
+    criteria: JSONValue
+
+
+class EvaluationAnswer(TypedDict, total=False):
+    type: Literal["noul", "choice", "score"]
+    noul: float
+    choice: str
+    score: float
+    probabilities: dict[str, float]
+    confidence: float
+    legend: dict[str, JSONValue]
+
+
+class EvaluationUsage(TypedDict, total=False):
+    input_tokens: int
+    output_tokens: int
+
+
+class EvaluationResponse(TypedDict):
+    model: str
+    answers: dict[str, EvaluationAnswer]
+    usage: EvaluationUsage
+
+
+class RelayEvaluationClient:
+    """Pooled async client for the Router's non-streaming evaluation API."""
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        base_url: str = _DEFAULT_RELAY_URL,
+        session_id: str = "",
+    ) -> None:
+        if not api_key:
+            raise ValueError("api_key is required")
+        self._base_url = base_url.rstrip("/")
+        self._platform_session_id = session_id
+        self._session = aiohttp.ClientSession(
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "User-Agent": USER_AGENT,
+            },
+            raise_for_status=False,
+        )
+
+    @classmethod
+    def from_env(cls, *, session_id: str = "") -> RelayEvaluationClient:
+        api_key = _env_secret("SPEKO_API_KEY")
+        if not api_key:
+            raise ValueError("SPEKO_API_KEY is required for Router evaluations")
+        base_url = (
+            os.environ.get("SPEKO_ROUTER_URL", "").strip()
+            or os.environ.get("SPEKO_RELAY_URL", "").strip()
+            or _DEFAULT_RELAY_URL
+        )
+        return cls(api_key=api_key, base_url=base_url, session_id=session_id)
+
+    async def aclose(self) -> None:
+        await self._session.close()
+
+    async def evaluate(
+        self,
+        *,
+        state: JSONValue,
+        questions: dict[str, EvaluationQuestion],
+        idempotency_key: str,
+        provider: str = "typesafe",
+        model: str = "jev-1.13.0",
+    ) -> EvaluationResponse:
+        """Evaluate one batch; cancelling this coroutine cancels the HTTP call."""
+
+        if not idempotency_key:
+            raise ValueError("idempotency_key is required")
+        headers = {"Idempotency-Key": idempotency_key}
+        if self._platform_session_id:
+            headers["Speko-Client-Session-ID"] = self._platform_session_id
+        body = {
+            "routing": {
+                "mode": "explicit",
+                "provider": provider,
+                "model": model,
+            },
+            "state": state,
+            "questions": questions,
+        }
+        probe = active_probe()
+        probe_turn_id = probe.current_turn_id if probe is not None else None
+        async with self._session.post(
+            f"{self._base_url}/v1/evaluations", json=body, headers=headers
+        ) as response:
+            decoded = await _decode_json(response)
+            if response.status != 200:
+                raise _envelope_error(response.status, decoded)
+            _report_evaluation_leg(response, probe, probe_turn_id)
+            if not isinstance(decoded.get("answers"), dict):
+                raise RelayError(
+                    "Router returned a malformed evaluation response",
+                    retryable=True,
+                )
+            return decoded  # type: ignore[return-value]
 
 
 class RelayLLMClient:
@@ -133,6 +246,18 @@ def _report_llm_leg(response: aiohttp.ClientResponse) -> None:
     request_id = str(response.headers.get("Speko-Request-ID", ""))
     if request_id:
         _report_probe_leg("llm", request_id=request_id)
+
+
+def _report_evaluation_leg(
+    response: aiohttp.ClientResponse,
+    probe: ConversationProbe | None,
+    turn_id: str | None,
+) -> None:
+    request_id = str(response.headers.get("Speko-Request-ID", ""))
+    if request_id and probe is not None and turn_id:
+        probe.report_leg(
+            "evaluation", request_id=request_id, expected_turn_id=turn_id
+        )
 
 
 async def _sse_events(

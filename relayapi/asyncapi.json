@@ -3,7 +3,7 @@
   "info": {
     "title": "Speko Router streaming API",
     "version": "1.0.0",
-    "description": "WebSocket contract of the Speko Router: streaming speech-to-text and text-to-speech sessions, plus the three native speech-to-speech routes. On the STT and TTS routes JSON text frames carry the control messages and events documented here and binary frames carry raw audio in the format the session.configure frame declared, with no JSON envelope. On /v1/realtime, /v1/live and /v1/bidi the Router speaks the OpenAI Realtime, GPT-Live and Gemini Live protocols natively: audio travels base64-encoded inside the vendor's own JSON events, the Router forwards a bounded set of vendor commands and every vendor server event verbatim, and only its own error frame is Router-shaped. The Go types in package relayapi are the source of truth for every Router-defined shape in this document, and speccheck_test.go machine-checks the two against each other. The HTTP endpoints are specified separately in openapi.yaml."
+    "description": "WebSocket contract of the Speko Router: streaming speech-to-text and text-to-speech sessions, plus the three native speech-to-speech routes. On the STT and TTS routes JSON text frames carry the control messages and events documented here and binary frames carry raw audio in the format the session.configure frame declared, with no JSON envelope. On /v1/realtime, /v1/live and /v1/bidi the Router speaks the OpenAI/xAI Realtime, GPT-Live and Gemini Live protocols natively: audio travels base64-encoded inside the vendor's own JSON events, the Router forwards a bounded set of vendor commands and every vendor server event verbatim, and only its own error frame is Router-shaped. The Go types in package relayapi are the source of truth for every Router-defined shape in this document, and speccheck_test.go machine-checks the two against each other. The HTTP endpoints are specified separately in openapi.yaml."
   },
   "defaultContentType": "application/json",
   "servers": {
@@ -13,7 +13,9 @@
       "description": "Global entry point. The upgrade request authenticates with a Speko-issued bearer token and must carry an Idempotency-Key header. The idempotency content hash of a WebSocket session is the SHA-256 of the exact session.configure text-frame bytes, so a retry must reproduce the configure frame byte-for-byte; later frames are intentionally outside the hash — they are the stream's continuous content, guarded by budgets and leases, while the configure frame is the session's intent.",
       "security": [
         {
-          "bearerAuth": []
+          "bearerAuth": [
+
+          ]
         }
       ]
     }
@@ -169,7 +171,7 @@
       }
     },
     "/v1/realtime": {
-      "description": "OpenAI Realtime speech-to-speech, spoken natively. The model is selected exactly with the `model` query parameter (GET /v1/realtime?model=gpt-realtime-2.1); the idempotency content hash is the SHA-256 of that model value. Once the session is admitted the Router relays the vendor protocol: the client sends Realtime client events (session.update, input_audio_buffer.append with base64 PCM, input_audio_buffer.commit, conversation.item.create, response.create, response.cancel, ...) and receives every Realtime server event (session.created, session.updated, input_audio_buffer.speech_started, response.output_audio.delta, response.done, ...) verbatim. The Router pins the admitted model and mono PCM16 at 24 kHz: a session.update that names another model or audio format is refused with invalid_request, and GPT-Live-only commands are refused the same way. Audio is base64-encoded inside JSON text frames; binary frames are not accepted. The Router's own terminal error frame (lease_expired, budget_exhausted, provider_unavailable) uses the shared ErrorEvent shape; vendor `error` events pass through unchanged.",
+      "description": "OpenAI or xAI Realtime speech-to-speech, spoken natively. The model is selected exactly with the `model` query parameter (for example, /v1/realtime?model=gpt-realtime-2.1 or a versioned grok-voice model), and its catalog row selects openai.realtime.v1 or xai.realtime.v1. The idempotency content hash is the SHA-256 of that model value. Once the session is admitted the Router relays that vendor's protocol: the client sends Realtime-shaped client events (session.update, input_audio_buffer.append with base64 PCM, input_audio_buffer.commit, conversation.item.create, response.create, response.cancel, ...) and receives every Realtime server event (session.created, session.updated, input_audio_buffer.speech_started, response.output_audio.delta, response.done, ...) verbatim. The Router pins the admitted model and mono PCM16 at 24 kHz: a session.update that names another model or audio format is refused with invalid_request, and GPT-Live-only commands are refused the same way. Audio is base64-encoded inside JSON text frames; binary frames are not accepted. The Router's own terminal error frame (lease_expired, budget_exhausted, provider_unavailable) uses the shared ErrorEvent shape; vendor `error` events pass through unchanged. xAI session.update keeps voice and turn_detection at the top level of session, as required by xAI's native protocol.",
       "parameters": {
         "model": {
           "description": "Exact Realtime model id from GET /v1/models rows whose endpoint is /v1/realtime.",
@@ -214,14 +216,14 @@
       },
       "publish": {
         "operationId": "sendRealtimeEvents",
-        "summary": "OpenAI Realtime client events, forwarded to the model.",
+        "summary": "OpenAI/xAI Realtime client events, forwarded to the model.",
         "message": {
           "$ref": "#/components/messages/nativeClientEvent"
         }
       },
       "subscribe": {
         "operationId": "receiveRealtimeEvents",
-        "summary": "OpenAI Realtime server events, plus the Router error frame.",
+        "summary": "OpenAI/xAI Realtime server events, plus the Router error frame.",
         "message": {
           "oneOf": [
             {

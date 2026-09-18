@@ -18,7 +18,9 @@
   ],
   "security": [
     {
-      "bearerAuth": []
+      "bearerAuth": [
+
+      ]
     }
   ],
   "paths": {
@@ -27,7 +29,9 @@
         "operationId": "getOpenAPISpec",
         "summary": "Download the canonical Router HTTP contract",
         "description": "Returns this exact OpenAPI 3.1 document without authentication. Agents and code generators can use it to discover every HTTP operation, request shape, response shape, error code, and lifecycle convention. Streaming speech operations are described by the AsyncAPI document in the public Gateway repository.",
-        "security": [],
+        "security": [
+
+        ],
         "responses": {
           "200": {
             "description": "The canonical OpenAPI 3.1 document.",
@@ -59,7 +63,7 @@
       "get": {
         "operationId": "listModels",
         "summary": "List currently routable models",
-        "description": "Returns the slice of the model catalog that is currently routable. The Router is generally available: every organization may route to any catalog model, so the listing is shaped by routability, not by per-organization enrollment. The catalog digest identifies the release-pinned catalog that produced the listing so support can correlate a caller's view with an exact release. The listing is advisory: admission remains the enforcement point for access gates and credit. Optional language, objective, and path parameters select the exact benchmark projection used to order and annotate the rows.",
+        "description": "Returns the slice of the model catalog that is currently routable. The Router is generally available: every organization may route to any catalog model, so the listing is shaped by routability, not by per-organization enrollment. The catalog digest identifies the release-pinned catalog that produced the listing so support can correlate a caller's view with an exact release. The listing is advisory: admission remains the enforcement point for access gates and credit. By default the response includes every public model. The optional language, objective, and path parameters select the exact benchmark projection used to order and annotate the rows.",
         "parameters": [
           {
             "name": "language",
@@ -87,14 +91,23 @@
           {
             "name": "path",
             "in": "query",
-            "description": "Speech transport projection; streaming is an alias for stream.",
+            "description": "Catalog projection. Defaults to all; streaming is an alias for stream. Stream includes only models whose capabilities.streaming is true. Batch preserves the prerecorded STT projection.",
             "schema": {
               "type": "string",
               "enum": [
+                "all",
                 "stream",
                 "streaming",
                 "batch"
               ]
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "description": "Optional capability category filter.",
+            "schema": {
+              "$ref": "#/components/schemas/Kind"
             }
           }
         ],
@@ -331,6 +344,66 @@
                 "schema": {
                   "type": "string",
                   "description": "Returned when the request set stream to true. Each SSE frame names its event and carries one JSON data payload documented by the schema of the same shape: response.created → ResponseCreated, response.item.added → ResponseItemAdded, response.text.delta → ResponseTextDelta, response.function_call_arguments.delta → ResponseFunctionCallArgumentsDelta, response.item.completed → ResponseItemCompleted, response.completed → ResponseCompleted, and error → ErrorEnvelope (the same envelope every non-2xx HTTP response uses). Every stream carries exactly one terminal event — response.completed on success or error on failure — never both and never zero, so a client that sees the connection close without a terminal event knows the stream was truncated rather than finished."
+                }
+              }
+            }
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/evaluations": {
+      "post": {
+        "operationId": "createEvaluation",
+        "summary": "Evaluate typed questions against shared state with Jev",
+        "description": "Executes one non-streaming TypeSafe Jev evaluation. Routing must be explicit. The Router preserves native question ids, option keys, probabilities, confidence, Score legends, and reported usage. The application owns every decision and subsequent action.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EvaluationRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The validated Jev evaluation result.",
+            "headers": {
+              "Speko-Request-ID": {
+                "$ref": "#/components/headers/SpekoRequestID"
+              },
+              "Speko-Attempt-ID": {
+                "$ref": "#/components/headers/SpekoAttemptID"
+              },
+              "Speko-Provider": {
+                "$ref": "#/components/headers/SpekoProvider"
+              },
+              "Speko-Model": {
+                "$ref": "#/components/headers/SpekoModel"
+              },
+              "Speko-Region": {
+                "$ref": "#/components/headers/SpekoRegion"
+              },
+              "RateLimit-Policy": {
+                "$ref": "#/components/headers/RateLimitPolicy"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvaluationResponse"
                 }
               }
             }
@@ -664,13 +737,18 @@
           "stt",
           "tts",
           "llm",
-          "s2s"
+          "s2s",
+          "evaluation"
         ]
       },
       "ModelCapabilities": {
         "type": "object",
         "description": "What a model supports. Capability gating happens before admission: a request using tools or structured output on a model that does not advertise them is rejected with capability_unsupported, never silently stripped. The set is flat rather than split by kind, so every model answers every question: an LLM model reports false for the transcription and synthesis capabilities, an STT model reports false for the generation ones, and false always means \"asking for this here is an error\", never \"unknown\". The transcription capabilities correspond one-to-one with the canonical asks in STTOptions, which is what makes those asks fail closed; per-provider settings are deliberately not advertised here, being vendor-specific rather than portable.",
         "properties": {
+          "streaming": {
+            "type": "boolean",
+            "description": "Supports the kind's public streaming operation: live audio processing on /v1/stt/stream, incremental text/audio sessions on /v1/tts/stream, streamed output on /v1/llm/responses, or bidirectional realtime audio on the S2S endpoint. A one-shot HTTP response whose body happens to be chunked does not make this true."
+          },
           "tools": {
             "type": "boolean"
           },
@@ -682,6 +760,19 @@
           },
           "reasoning": {
             "type": "boolean"
+          },
+          "evaluation_question_types": {
+            "type": "array",
+            "description": "Supported typed evaluation primitives; evaluation models only.",
+            "items": {
+              "type": "string",
+              "enum": [
+                "choice",
+                "score",
+                "noul"
+              ]
+            },
+            "uniqueItems": true
           },
           "diarization": {
             "type": "boolean",
@@ -709,6 +800,7 @@
           }
         },
         "required": [
+          "streaming",
           "tools",
           "structured_output",
           "cached_input",
@@ -774,10 +866,11 @@
             "type": "string",
             "enum": [
               "openai.realtime.v1",
+              "xai.realtime.v1",
               "openai.live.v1",
               "google.live.v1"
             ],
-            "description": "The native event protocol the S2S route speaks; omitted for every other kind. It also tells a client how to frame its messages: the two OpenAI protocols tag every message by \"type\", google.live.v1 by its single top-level key."
+            "description": "The native event protocol the S2S route speaks; omitted for every other kind. It also tells a client how to frame its messages: the OpenAI, xAI, and GPT-Live protocols tag every message by \"type\"; google.live.v1 uses its single top-level key."
           },
           "benchmark": {
             "$ref": "#/components/schemas/ModelBenchmark"
@@ -921,6 +1014,7 @@
           "path": {
             "type": "string",
             "enum": [
+              "all",
               "stream",
               "batch"
             ]
@@ -1635,6 +1729,193 @@
         "required": [
           "input",
           "max_output_tokens"
+        ],
+        "additionalProperties": false
+      },
+      "EvaluationRequest": {
+        "type": "object",
+        "description": "A TypeSafe-native state and typed question batch with an explicit Speko route.",
+        "properties": {
+          "routing": {
+            "$ref": "#/components/schemas/EvaluationRouting"
+          },
+          "state": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "object",
+                "additionalProperties": true
+              },
+              {
+                "type": "array",
+                "items": {
+                }
+              }
+            ]
+          },
+          "questions": {
+            "type": "object",
+            "minProperties": 1,
+            "additionalProperties": {
+              "$ref": "#/components/schemas/EvaluationQuestion"
+            }
+          }
+        },
+        "required": [
+          "routing",
+          "state",
+          "questions"
+        ],
+        "additionalProperties": false
+      },
+      "EvaluationRouting": {
+        "type": "object",
+        "properties": {
+          "mode": {"type": "string", "enum": ["explicit"]},
+          "provider": {"type": "string", "minLength": 1},
+          "model": {"type": "string", "minLength": 1}
+        },
+        "required": ["mode", "provider", "model"],
+        "additionalProperties": false
+      },
+      "EvaluationQuestion": {
+        "description": "A noul, choice, or score question. Instructions may be structured JSON. Choice criteria contain 2-255 keyed options; Score criteria contain 2-10 ordered levels; Noul criteria may describe true and/or false.",
+        "oneOf": [
+          {"$ref": "#/components/schemas/NoulQuestion"},
+          {"$ref": "#/components/schemas/ChoiceQuestion"},
+          {"$ref": "#/components/schemas/ScoreQuestion"}
+        ]
+      },
+      "EvaluationJSONStructure": {
+        "oneOf": [
+          {"type": "string"},
+          {"type": "object", "additionalProperties": true},
+          {"type": "array", "items": {}}
+        ]
+      },
+      "NoulQuestion": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["noul"]
+          },
+          "instructions": {
+            "$ref": "#/components/schemas/EvaluationJSONStructure"
+          },
+          "criteria": {
+            "type": "object",
+            "minProperties": 1,
+            "properties": {
+              "true": {"oneOf": [{"type": "null"}, {"$ref": "#/components/schemas/EvaluationJSONStructure"}]},
+              "false": {"oneOf": [{"type": "null"}, {"$ref": "#/components/schemas/EvaluationJSONStructure"}]}
+            },
+            "additionalProperties": false
+          }
+        },
+        "required": ["type", "instructions"],
+        "additionalProperties": false
+      },
+      "ChoiceQuestion": {
+        "type": "object",
+        "properties": {
+          "type": {"type": "string", "enum": ["choice"]},
+          "instructions": {"$ref": "#/components/schemas/EvaluationJSONStructure"},
+          "criteria": {
+            "type": "object",
+            "minProperties": 2,
+            "maxProperties": 255,
+            "additionalProperties": {
+              "oneOf": [{"type": "null"}, {"$ref": "#/components/schemas/EvaluationJSONStructure"}]
+            }
+          }
+        },
+        "required": ["type", "instructions", "criteria"],
+        "additionalProperties": false
+      },
+      "ScoreQuestion": {
+        "type": "object",
+        "properties": {
+          "type": {"type": "string", "enum": ["score"]},
+          "instructions": {"$ref": "#/components/schemas/EvaluationJSONStructure"},
+          "criteria": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 10,
+            "items": {"$ref": "#/components/schemas/EvaluationJSONStructure"}
+          }
+        },
+        "required": ["type", "instructions", "criteria"],
+        "additionalProperties": false
+      },
+      "EvaluationAnswer": {
+        "description": "One native Jev answer. Noul is a numeric yes probability. Choice and Score confidence is a separate distribution statistic and must not be multiplied into the selected answer probability.",
+        "oneOf": [
+          {"$ref": "#/components/schemas/NoulAnswer"},
+          {"$ref": "#/components/schemas/ChoiceAnswer"},
+          {"$ref": "#/components/schemas/ScoreAnswer"}
+        ]
+      },
+      "NoulAnswer": {
+        "type": "object",
+        "properties": {
+          "type": {"type": "string", "enum": ["noul"]},
+          "noul": {"type": "number", "minimum": 0, "maximum": 1}
+        },
+        "required": ["type", "noul"],
+        "additionalProperties": false
+      },
+      "ChoiceAnswer": {
+        "type": "object",
+        "properties": {
+          "type": {"type": "string", "enum": ["choice"]},
+          "choice": {"type": "string"},
+          "probabilities": {
+            "type": "object",
+            "additionalProperties": {"type": "number", "minimum": 0, "maximum": 1}
+          },
+          "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+        },
+        "required": ["type", "choice", "probabilities", "confidence"],
+        "additionalProperties": false
+      },
+      "ScoreAnswer": {
+        "type": "object",
+        "properties": {
+          "type": {"type": "string", "enum": ["score"]},
+          "score": {"type": "number", "minimum": 0, "maximum": 9},
+          "probabilities": {
+            "type": "object",
+            "additionalProperties": {"type": "number", "minimum": 0, "maximum": 1}
+          },
+          "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+          "legend": {"type": "object", "additionalProperties": true}
+        },
+        "required": ["type", "score", "probabilities", "confidence", "legend"],
+        "additionalProperties": false
+      },
+      "EvaluationResponse": {
+        "type": "object",
+        "properties": {
+          "model": {
+            "type": "string"
+          },
+          "answers": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/EvaluationAnswer"
+            }
+          },
+          "usage": {
+            "$ref": "#/components/schemas/Usage"
+          }
+        },
+        "required": [
+          "model",
+          "answers",
+          "usage"
         ],
         "additionalProperties": false
       },

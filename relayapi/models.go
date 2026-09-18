@@ -13,16 +13,21 @@ import (
 type Kind string
 
 const (
-	KindSTT Kind = "stt"
-	KindTTS Kind = "tts"
-	KindLLM Kind = "llm"
-	KindS2S Kind = "s2s"
+	KindSTT        Kind = "stt"
+	KindTTS        Kind = "tts"
+	KindLLM        Kind = "llm"
+	KindS2S        Kind = "s2s"
+	KindEvaluation Kind = "evaluation"
 )
 
 // ModelCapabilities advertises what a model supports. Capability gating
 // happens before admission: a request using a capability a model does not
 // advertise is rejected with capability_unsupported, never silently stripped.
 type ModelCapabilities struct {
+	// Streaming says the model supports its kind's public streaming operation:
+	// live audio processing for STT, incremental text/audio sessions for TTS,
+	// streamed output for LLM, and bidirectional realtime audio for S2S.
+	Streaming        bool `json:"streaming"`
 	Tools            bool `json:"tools"`
 	StructuredOutput bool `json:"structured_output"`
 	CachedInput      bool `json:"cached_input"`
@@ -40,8 +45,9 @@ type ModelCapabilities struct {
 	// They are separate bits rather than one enum because a model may report
 	// both, and neither is derived from the other: the relay never groups
 	// characters into words on the caller's behalf.
-	WordTimings      bool `json:"word_timings"`
-	CharacterTimings bool `json:"character_timings"`
+	WordTimings             bool     `json:"word_timings"`
+	CharacterTimings        bool     `json:"character_timings"`
+	EvaluationQuestionTypes []string `json:"evaluation_question_types,omitempty"`
 }
 
 // SampleRateRange is an inclusive set of sample rates accepted by one audio
@@ -185,13 +191,14 @@ type Model struct {
 	OutputAudioFormats []AudioFormat     `json:"output_audio_formats,omitempty"`
 	BatchAudioLimits   *BatchAudioLimits `json:"batch_audio_limits,omitempty"`
 	// Endpoint is the public Router route an S2S model is served on
-	// (/v1/realtime, /v1/live, or /v1/bidi); omitted for every other kind,
+	// (/v1/realtime, /v1/live, or /v1/bidi); multiple native protocols may
+	// share a route and are disambiguated by the exact model id. Omitted for every other kind,
 	// whose routes are fixed per kind.
 	Endpoint string `json:"endpoint,omitempty"`
 	// Protocol names the native event protocol an S2S route speaks
-	// (openai.realtime.v1, openai.live.v1, google.live.v1); omitted for every
-	// other kind. It also tells a client how to FRAME its messages: the two
-	// OpenAI protocols tag by "type", google.live.v1 by top-level key.
+	// (openai.realtime.v1, xai.realtime.v1, openai.live.v1, google.live.v1); omitted for every
+	// other kind. It also tells a client how to FRAME its messages: OpenAI,
+	// xAI, and GPT-Live tag by "type"; google.live.v1 uses a top-level key.
 	Protocol  string          `json:"protocol,omitempty"`
 	Benchmark *ModelBenchmark `json:"benchmark,omitempty"`
 }
@@ -212,8 +219,8 @@ func (m Model) Validate() error {
 			return fmt.Errorf("regions[%d]: region id must not be blank", i)
 		}
 	}
-	if m.Kind == KindLLM && len(m.AudioFormats) != 0 {
-		return fmt.Errorf("audio_formats: must be omitted for llm models")
+	if (m.Kind == KindLLM || m.Kind == KindEvaluation) && len(m.AudioFormats) != 0 {
+		return fmt.Errorf("audio_formats: must be omitted for non-speech models")
 	}
 	if (m.Kind == KindSTT || m.Kind == KindTTS || m.Kind == KindS2S) && len(m.AudioFormats) == 0 {
 		return fmt.Errorf("audio_formats: at least one format is required for speech models")
@@ -243,6 +250,26 @@ func (m Model) Validate() error {
 		if m.Endpoint != "" || m.Protocol != "" {
 			return fmt.Errorf("endpoint and protocol: valid only for s2s models")
 		}
+	}
+	if m.Kind == KindEvaluation {
+		if m.Capabilities.Streaming {
+			return fmt.Errorf("streaming: evaluation models are non-streaming")
+		}
+		if len(m.Capabilities.EvaluationQuestionTypes) == 0 {
+			return fmt.Errorf("evaluation_question_types: required for evaluation models")
+		}
+		seenQuestionTypes := make(map[string]struct{}, len(m.Capabilities.EvaluationQuestionTypes))
+		for _, questionType := range m.Capabilities.EvaluationQuestionTypes {
+			if questionType != EvaluationQuestionChoice && questionType != EvaluationQuestionScore && questionType != EvaluationQuestionNoul {
+				return fmt.Errorf("evaluation_question_types: unsupported value %q", questionType)
+			}
+			if _, duplicate := seenQuestionTypes[questionType]; duplicate {
+				return fmt.Errorf("evaluation_question_types: duplicate value %q", questionType)
+			}
+			seenQuestionTypes[questionType] = struct{}{}
+		}
+	} else if len(m.Capabilities.EvaluationQuestionTypes) != 0 {
+		return fmt.Errorf("evaluation_question_types: valid only for evaluation models")
 	}
 	for i, format := range m.OutputAudioFormats {
 		if err := format.Validate(); err != nil {
@@ -276,5 +303,5 @@ func (m ModelsResponse) Validate() error {
 }
 
 func validKind(v Kind) bool {
-	return v == KindSTT || v == KindTTS || v == KindLLM || v == KindS2S
+	return v == KindSTT || v == KindTTS || v == KindLLM || v == KindS2S || v == KindEvaluation
 }
