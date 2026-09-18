@@ -570,7 +570,9 @@ async def test_relay_reports_evaluation_leg_from_response_header() -> None:
     user_state(session, "listening", "speaking")
 
     _report_evaluation_leg(
-        SimpleNamespace(headers={"Speko-Request-ID": "req-evaluation-1"})
+        SimpleNamespace(headers={"Speko-Request-ID": "req-evaluation-1"}),
+        probe,
+        probe.current_turn_id,
     )  # type: ignore[arg-type]
     await probe.aclose()
 

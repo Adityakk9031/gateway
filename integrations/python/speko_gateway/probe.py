@@ -252,6 +252,12 @@ class ConversationProbe:
     # ------------------------------------------------------------------
     # Registry hooks used by the Speko STT/TTS/LLM streams.
 
+    @property
+    def current_turn_id(self) -> str | None:
+        """Return the open turn identifier for request-origin correlation."""
+
+        return self._turn_id
+
     @_never_raises
     def report_leg(
         self,
@@ -262,6 +268,7 @@ class ConversationProbe:
         request_id: str = "",
         provider: str = "",
         model: str = "",
+        expected_turn_id: str = "",
     ) -> None:
         """Bind a provider leg's identity to the open turn.
 
@@ -270,7 +277,9 @@ class ConversationProbe:
         request ID.
         """
 
-        if self._turn_id is None:
+        if self._turn_id is None or (
+            expected_turn_id and expected_turn_id != self._turn_id
+        ):
             return
         data: dict[str, Any] = {"kind": kind}
         if kind in ("stt", "tts"):

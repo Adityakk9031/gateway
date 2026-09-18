@@ -1,11 +1,48 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from aiohttp import web
 
+from speko_gateway.probe import ConversationProbe
 from speko_gateway.relay import RelayEvaluationClient
+
+
+class _FakeGatewayClient:
+    def __init__(self) -> None:
+        self.batches: list[list[dict[str, Any]]] = []
+
+    async def post_turn_events(self, events: list[dict[str, Any]]) -> None:
+        self.batches.append(list(events))
+
+    async def aclose(self) -> None:
+        pass
+
+
+class _FakeEmitter:
+    def __init__(self) -> None:
+        self.handlers: dict[str, list[Any]] = {}
+
+    def on(self, event: str, callback: Any) -> None:
+        self.handlers.setdefault(event, []).append(callback)
+
+    def off(self, event: str, callback: Any) -> None:
+        if callback in self.handlers.get(event, []):
+            self.handlers[event].remove(callback)
+
+    def emit(self, event: str, payload: Any) -> None:
+        for callback in list(self.handlers.get(event, [])):
+            callback(payload)
+
+
+class _FakeAgentSession(_FakeEmitter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.output = SimpleNamespace(audio=_FakeEmitter())
+        self.user_state = "listening"
 
 
 async def _server(handler):
@@ -102,3 +139,61 @@ async def test_evaluation_client_requires_explicit_idempotency_key():
             await client.evaluate(state="x", questions={}, idempotency_key="")
     finally:
         await client.aclose()
+
+
+async def test_delayed_evaluation_is_not_attached_to_a_later_turn():
+    request_started = asyncio.Event()
+    release_response = asyncio.Event()
+
+    async def handler(request):
+        request_started.set()
+        await release_response.wait()
+        return web.json_response(
+            {
+                "model": "jev-1.13.0",
+                "answers": {"handoff": {"type": "noul", "noul": 0.1}},
+                "usage": {"input_tokens": 10, "output_tokens": 1},
+            },
+            headers={"Speko-Request-ID": "req_delayed"},
+        )
+
+    runner, base_url = await _server(handler)
+    session = _FakeAgentSession()
+    probe_client = _FakeGatewayClient()
+    probe = ConversationProbe(session, client=probe_client)  # type: ignore[arg-type]
+    probe.start()
+    session.user_state = "speaking"
+    session.emit(
+        "user_state_changed",
+        SimpleNamespace(old_state="listening", new_state="speaking"),
+    )
+    client = RelayEvaluationClient(api_key="test", base_url=base_url)
+    task = asyncio.create_task(
+        client.evaluate(
+            state={"transcript": "first turn"},
+            questions={
+                "handoff": {
+                    "type": "noul",
+                    "instructions": "Was a human requested?",
+                }
+            },
+            idempotency_key="turn-delayed",
+        )
+    )
+    try:
+        await request_started.wait()
+        probe._complete_turn()
+        probe._begin_turn("user")
+        release_response.set()
+        await task
+    finally:
+        await client.aclose()
+        await probe.aclose()
+        await runner.cleanup()
+
+    events = [event for batch in probe_client.batches for event in batch]
+    assert not any(
+        event["type"] == "leg.attached"
+        and event["data"].get("request_id") == "req_delayed"
+        for event in events
+    )

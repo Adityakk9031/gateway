@@ -18,6 +18,7 @@ import aiohttp
 
 from ._user_agent import USER_AGENT
 from .client import _env_secret
+from .probe import ConversationProbe, active_probe
 from .probe import report_leg as _report_probe_leg
 
 _DEFAULT_RELAY_URL = "https://router.speko.dev"
@@ -136,13 +137,15 @@ class RelayEvaluationClient:
             "state": state,
             "questions": questions,
         }
+        probe = active_probe()
+        probe_turn_id = probe.current_turn_id if probe is not None else None
         async with self._session.post(
             f"{self._base_url}/v1/evaluations", json=body, headers=headers
         ) as response:
             decoded = await _decode_json(response)
             if response.status != 200:
                 raise _envelope_error(response.status, decoded)
-            _report_evaluation_leg(response)
+            _report_evaluation_leg(response, probe, probe_turn_id)
             if not isinstance(decoded.get("answers"), dict):
                 raise RelayError(
                     "Router returned a malformed evaluation response",
@@ -245,10 +248,16 @@ def _report_llm_leg(response: aiohttp.ClientResponse) -> None:
         _report_probe_leg("llm", request_id=request_id)
 
 
-def _report_evaluation_leg(response: aiohttp.ClientResponse) -> None:
+def _report_evaluation_leg(
+    response: aiohttp.ClientResponse,
+    probe: ConversationProbe | None,
+    turn_id: str | None,
+) -> None:
     request_id = str(response.headers.get("Speko-Request-ID", ""))
-    if request_id:
-        _report_probe_leg("evaluation", request_id=request_id)
+    if request_id and probe is not None and turn_id:
+        probe.report_leg(
+            "evaluation", request_id=request_id, expected_turn_id=turn_id
+        )
 
 
 async def _sse_events(
