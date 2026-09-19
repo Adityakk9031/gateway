@@ -188,6 +188,7 @@ class SpeechStream(stt.RecognizeStream):
         self._request_id = utils.shortuuid()
         self._gateway_stream: LiveKitSTTStream | None = None
         self._speaking = False
+        self._speech_ended = False
 
     async def _run(self) -> None:
         first_frame = None
@@ -264,6 +265,7 @@ class SpeechStream(stt.RecognizeStream):
         if event.provider_request_id:
             self._request_id = event.provider_request_id
         if event.type == "speech.started":
+            self._speech_ended = False
             if not self._speaking:
                 self._speaking = True
                 self._event_ch.send_nowait(
@@ -274,11 +276,13 @@ class SpeechStream(stt.RecognizeStream):
                 )
             return
         if event.type == "speech.ended":
+            self._speech_ended = True
             self._emit_end()
             return
         if event.type not in {"transcript.delta", "transcript.final"} or not event.text:
             return
-        if not self._speaking:
+        is_final = event.type == "transcript.final"
+        if not self._speaking and not self._speech_ended:
             self._speaking = True
             self._event_ch.send_nowait(
                 stt.SpeechEvent(
@@ -290,7 +294,7 @@ class SpeechStream(stt.RecognizeStream):
             stt.SpeechEvent(
                 type=(
                     stt.SpeechEventType.FINAL_TRANSCRIPT
-                    if event.type == "transcript.final"
+                    if is_final
                     else stt.SpeechEventType.INTERIM_TRANSCRIPT
                 ),
                 request_id=self._request_id,
@@ -304,6 +308,8 @@ class SpeechStream(stt.RecognizeStream):
                 ],
             )
         )
+        if is_final and self._speech_ended:
+            self._speech_ended = False
 
     def _emit_end(self) -> None:
         if not self._speaking:
