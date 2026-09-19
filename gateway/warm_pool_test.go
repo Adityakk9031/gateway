@@ -346,3 +346,37 @@ func TestPlanPoolBoundsAStalledRefill(t *testing.T) {
 		t.Fatalf("pool metrics = %+v, want the route retained", metrics)
 	}
 }
+
+// TestPlanPoolSharesRouteAcrossDifferentClientSessionIDs verifies that two requests
+// differing only by ClientSessionID map to the same warm route, preventing pool
+// fragmentation and route exhaustion.
+func TestPlanPoolSharesRouteAcrossDifferentClientSessionIDs(t *testing.T) {
+	t.Parallel()
+	plans := &fakePlanClient{plan: gatewayPlan()}
+	pool := newWarmPool(t, plans, 2)
+
+	req1 := managedWarmRequest()
+	req1.Request.ClientSessionID = "client-session-aaa"
+	if err := pool.Warm(context.Background(), req1); err != nil {
+		t.Fatalf("warm: %v", err)
+	}
+
+	req2 := managedWarmRequest()
+	req2.Request.ClientSessionID = "client-session-bbb"
+	plan, ok := pool.Take(req2)
+	if !ok {
+		t.Fatal("expected warm pool hit for request with different ClientSessionID")
+	}
+	if plan.PlanID == "" {
+		t.Fatal("expected non-empty plan ID")
+	}
+
+	metrics := pool.Metrics()
+	if metrics.Routes != 1 {
+		t.Fatalf("routes = %d, want 1 (different ClientSessionIDs should share a single route)", metrics.Routes)
+	}
+	if metrics.Hits != 1 {
+		t.Fatalf("hits = %d, want 1", metrics.Hits)
+	}
+}
+
