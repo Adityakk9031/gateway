@@ -361,6 +361,17 @@ func TestPlanPoolSharesRouteAcrossDifferentClientSessionIDs(t *testing.T) {
 		t.Fatalf("warm: %v", err)
 	}
 
+	plans.mu.Lock()
+	if len(plans.batchRequests) == 0 {
+		plans.mu.Unlock()
+		t.Fatal("expected batch requests recorded")
+	}
+	if got := plans.batchRequests[0].Request.ClientSessionID; got != "" {
+		plans.mu.Unlock()
+		t.Fatalf("batch request ClientSessionID = %q, want empty", got)
+	}
+	plans.mu.Unlock()
+
 	req2 := managedWarmRequest()
 	req2.Request.ClientSessionID = "client-session-bbb"
 	plan, ok := pool.Take(req2)
