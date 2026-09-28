@@ -113,7 +113,7 @@ func TestDialogueAdapterServesOnlyV3Models(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new dialogue adapter: %v", err)
 	}
-	for _, model := range []string{"eleven_flash_v2_5", "eleven_multilingual_v2", "auto", ""} {
+	for _, model := range []string{"eleven_flash_v2_5", "eleven_multilingual_v2", "eleven_v4", "eleven_v4_turbo", "auto", ""} {
 		if ServesModel(model) {
 			t.Fatalf("ServesModel(%q) = true, want false", model)
 		}
