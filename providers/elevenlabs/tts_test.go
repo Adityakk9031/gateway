@@ -330,6 +330,27 @@ func TestAdapterRejectsUnsupportedModelWithoutLeakingCredential(t *testing.T) {
 	}
 }
 
+// v4 is not a v3-family model: the dialogue socket's eleven_v3 prefix gate
+// refuses it, so it must build a multi-context endpoint like any sibling.
+func TestMultiContextEndpointServesV4Family(t *testing.T) {
+	t.Parallel()
+	adapter, err := New(Config{})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+	media := protocol.MediaFormat{Encoding: "pcm_s16le", SampleRateHz: 24_000, Channels: 1}
+	for _, model := range []string{"eleven_v4", "eleven_v4_turbo"} {
+		raw, err := multiContextEndpoint(adapter.endpointPolicy, "wss://api.elevenlabs.io/v1/text-to-speech", model, protocol.RequestOptions{Voice: "voice-1"}, media, protocol.RouteProviderDirect, protocol.CredentialsBYOK, "key")
+		if err != nil {
+			t.Fatalf("%s: %v", model, err)
+		}
+		endpoint, _ := url.Parse(raw)
+		if endpoint.Path != "/v1/text-to-speech/voice-1/multi-stream-input" || endpoint.Query().Get("model_id") != model {
+			t.Fatalf("%s endpoint = %s", model, raw)
+		}
+	}
+}
+
 type clientMessage struct {
 	ContextID    string `json:"context_id"`
 	Text         string `json:"text"`
