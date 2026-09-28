@@ -13,6 +13,7 @@ import (
 	"github.com/SpekoAI/gateway/internal/batchhttp"
 	"github.com/SpekoAI/gateway/internal/upstream"
 	"github.com/SpekoAI/gateway/metering"
+	"github.com/SpekoAI/gateway/protocol"
 	runtimepkg "github.com/SpekoAI/gateway/runtime"
 )
 
@@ -32,10 +33,14 @@ const (
 	// service refuses more than 600 s (400 APEX_ASR_MAX_AUDIO_SECONDS), but
 	// measured on 2026-09-28 it silently returns no segments from roughly
 	// 290 s, and transcribe-1-pro truncates its text at 5040 characters. With
-	// no segments the relay cannot detect a truncated transcript, so the cap
-	// keeps every request inside the range where alignment comes back; longer
-	// audio is chunked by the jobs path.
-	BatchMaxDurationSeconds int64 = 240
+	// no segments the relay cannot detect a truncated transcript. 180 s keeps
+	// every request where alignment comes back and leaves Pro's text cap at
+	// 28 characters per second, well above even dense speech (~18/s); the
+	// jobs path chunks longer audio.
+	BatchMaxDurationSeconds int64 = 180
+	// batchPath is the one path this adapter posts to; a route naming any
+	// other path on an approved host is a mis-route, refused before upload.
+	batchPath = "/v1/asr"
 	// BatchMaxAudioBytes is the measured body ceiling (a 44 MiB upload passed,
 	// 52 MiB answered 413) less room for the multipart envelope.
 	BatchMaxAudioBytes int64 = (44 << 20) - (16 << 10)
@@ -110,6 +115,15 @@ func (a *BatchAdapter) Transcribe(ctx context.Context, request runtimepkg.BatchT
 	if request.AudioBytes > BatchMaxAudioBytes {
 		return nil, &runtimepkg.ProviderError{Code: batchhttp.CodeInputTooLarge, Message: "the upload exceeds Fish Audio's ASR body limit"}
 	}
+	// The relay applies the same bound from the catalog; a direct caller gets
+	// it here, before Fish processes (and bills) audio whose result would be
+	// refused as unverifiable.
+	if seconds := pcmSeconds(request.Media, request.AudioBytes); seconds > float64(BatchMaxDurationSeconds) {
+		return nil, &runtimepkg.ProviderError{Code: batchhttp.CodeInputTooLarge, Message: fmt.Sprintf("the recording is %.0f s; Fish ASR accepts %d s per request", seconds, BatchMaxDurationSeconds), Hint: "Split the recording or submit it as a transcription job."}
+	}
+	if err := checkOptions(model, request.Options); err != nil {
+		return nil, err
+	}
 	credential, err := batchhttp.Credential(request.Plan)
 	if err != nil {
 		return nil, err
@@ -117,6 +131,9 @@ func (a *BatchAdapter) Transcribe(ctx context.Context, request runtimepkg.BatchT
 	endpoint, err := a.endpointPolicy.Parse(request.Plan.Route.Endpoint)
 	if err != nil {
 		return nil, err
+	}
+	if endpoint.Path != batchPath {
+		return nil, fmt.Errorf("fish batch adapter posts only to %s, got %q", batchPath, endpoint.Path)
 	}
 	fields := []batchhttp.MultipartField{{Name: "ignore_timestamps", Value: "false"}}
 	// The language is a hint: detection still runs and an unknown code is
@@ -154,6 +171,12 @@ func (a *BatchAdapter) Transcribe(ctx context.Context, request runtimepkg.BatchT
 	}
 	if err := batchhttp.DecodeJSON(response.Body, &payload); err != nil {
 		return nil, err
+	}
+	// A success body with no text, no segments and no duration is a shape this
+	// adapter does not understand, not silence: Fish reports the duration it
+	// processed even for a silent clip.
+	if payload.Duration <= 0 && strings.TrimSpace(payload.Text) == "" && len(payload.Segments) == 0 {
+		return nil, batchhttp.Malformed(errors.New("fish transcription carries neither duration, text nor segments"))
 	}
 	turns := parseTurns(payload.Text)
 	text := joinTurns(turns)
@@ -231,13 +254,17 @@ func joinTurns(turns []turn) string {
 }
 
 // alignedSegments walks Fish's word list through the turn texts, matching
-// letters and digits only (punctuation and cues are not aligned), and cuts a
-// segment at every turn and at every pause longer than 800 ms. Each segment's
-// text is the turn's own span, so punctuation and emotion cues survive. A word
-// that does not match the text where alignment expects it means the two
-// disagree, and the caller falls back to plain word grouping without speakers
-// rather than attributing speech to the wrong one. When diarize is set, the
-// speaker is written onto each aligned word in place.
+// letters and digits only (punctuation and cues are not aligned), and emits
+// the turns in order. A timed turn is cut at every pause longer than 800 ms;
+// each piece carries the turn's own span of text, so punctuation and cues
+// survive, and the last piece runs to the end of the turn so untimed trailing
+// text is kept. A turn with no timed words at all (a lone cue such as
+// "[laughter]") becomes a zero-length segment where the previous speech
+// ended, so neither its text nor its speaker disappears. A word the text does
+// not contain where alignment expects it means the two disagree, and the
+// caller falls back to plain word grouping without speakers rather than
+// attributing speech to the wrong one. When diarize is set, the speaker is
+// written onto each aligned word in place.
 func alignedSegments(turns []turn, words []batchhttp.Word, diarize bool) ([]runtimepkg.BatchSegment, bool) {
 	type position struct{ turn, offset int }
 	var stream []rune
@@ -252,10 +279,10 @@ func alignedSegments(turns []turn, words []batchhttp.Word, diarize bool) ([]runt
 		}
 	}
 	type placed struct {
-		word  *batchhttp.Word
-		start position
+		word   *batchhttp.Word
+		offset int
 	}
-	placedWords := make([]placed, 0, len(words))
+	byTurn := make([][]placed, len(turns))
 	cursor := 0
 	for index := range words {
 		word := &words[index]
@@ -275,43 +302,71 @@ func alignedSegments(turns []turn, words []batchhttp.Word, diarize bool) ([]runt
 		if first < 0 {
 			continue
 		}
-		placedWords = append(placedWords, placed{word: word, start: at[first]})
-	}
-	if len(placedWords) == 0 {
-		return nil, false
+		byTurn[at[first].turn] = append(byTurn[at[first].turn], placed{word: word, offset: at[first].offset})
 	}
 	var segments []runtimepkg.BatchSegment
-	begin := 0
-	for i := 1; i <= len(placedWords); i++ {
-		if i < len(placedWords) {
-			previous, next := placedWords[i-1], placedWords[i]
-			if next.start.turn == previous.start.turn && next.word.StartMS-previous.word.EndMS <= 800 {
+	var lastEnd int64
+	for index, t := range turns {
+		speaker := ""
+		if diarize {
+			speaker = t.speaker
+		}
+		timed := byTurn[index]
+		if len(timed) == 0 {
+			segments = append(segments, runtimepkg.BatchSegment{Text: t.text, StartMS: lastEnd, EndMS: lastEnd, Speaker: speaker})
+			continue
+		}
+		begin := 0
+		for i := 1; i <= len(timed); i++ {
+			if i < len(timed) && timed[i].word.StartMS-timed[i-1].word.EndMS <= 800 {
 				continue
 			}
+			from, to := timed[begin].offset, len(t.text)
+			if begin == 0 {
+				from = 0 // a turn's leading cue belongs to its first segment
+			}
+			if i < len(timed) {
+				to = timed[i].offset
+			}
+			segments = append(segments, runtimepkg.BatchSegment{Text: strings.TrimSpace(t.text[from:to]), StartMS: timed[begin].word.StartMS, EndMS: timed[i-1].word.EndMS, Speaker: speaker})
+			lastEnd = timed[i-1].word.EndMS
+			begin = i
 		}
-		head := placedWords[begin]
-		t := turns[head.start.turn]
-		from := head.start.offset
-		if begin == 0 || placedWords[begin-1].start.turn != head.start.turn {
-			from = 0 // a turn's leading cue belongs to its first segment
-		}
-		to := len(t.text)
-		if i < len(placedWords) && placedWords[i].start.turn == head.start.turn {
-			to = placedWords[i].start.offset
-		}
-		segment := runtimepkg.BatchSegment{Text: strings.TrimSpace(t.text[from:to]), StartMS: head.word.StartMS, EndMS: placedWords[i-1].word.EndMS}
 		if diarize {
-			segment.Speaker = t.speaker
-		}
-		segments = append(segments, segment)
-		begin = i
-	}
-	if diarize {
-		for _, p := range placedWords {
-			p.word.Speaker = turns[p.start.turn].speaker
+			for _, p := range timed {
+				p.word.Speaker = t.speaker
+			}
 		}
 	}
 	return segments, true
+}
+
+// checkOptions refuses asks Fish cannot honour, so a caller never gets a
+// successful transcript without the behaviour it requested. Fish takes only a
+// language hint; transcribe-1 does not label speakers.
+func checkOptions(model string, options protocol.RequestOptions) error {
+	stt := options.STT
+	switch {
+	case stt.Diarize() && model != BatchModel:
+		return &runtimepkg.ProviderError{Code: batchhttp.CodeInvalidRequest, Message: "Fish transcribe-1 does not label speakers", Hint: "Use transcribe-1-pro, or drop the diarization option."}
+	case len(stt.GetKeywords()) > 0:
+		return &runtimepkg.ProviderError{Code: batchhttp.CodeInvalidRequest, Message: "Fish ASR takes no keyword list", Hint: "Drop the keywords option or choose a provider that supports vocabulary biasing."}
+	case stt.ReduceNoise():
+		return &runtimepkg.ProviderError{Code: batchhttp.CodeInvalidRequest, Message: "Fish ASR has no noise-reduction option", Hint: "Drop the noise-reduction option."}
+	case len(stt.ProviderKeys("fish")) > 0:
+		return &runtimepkg.ProviderError{Code: batchhttp.CodeInvalidRequest, Message: "Fish ASR takes no provider-specific settings"}
+	}
+	return nil
+}
+
+// pcmSeconds is the recording's duration from its byte length, or zero when
+// the format does not say.
+func pcmSeconds(media protocol.MediaFormat, audioBytes int64) float64 {
+	perSecond := int64(media.SampleRateHz) * int64(media.Channels) * 2
+	if perSecond <= 0 || audioBytes <= 44 {
+		return 0
+	}
+	return float64(audioBytes-44) / float64(perSecond)
 }
 
 func baseLanguage(language string) string {

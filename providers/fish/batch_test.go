@@ -288,3 +288,97 @@ func TestBatchMapsStatusAndSizeErrors(t *testing.T) {
 		t.Fatalf("oversized: %v", err)
 	}
 }
+
+// A turn with no timed words (a lone cue, or trailing text Fish did not
+// align) still reaches the segments, at the point the previous speech ended,
+// with its speaker.
+func TestBatchKeepsUntimedTurnsAsPointSegments(t *testing.T) {
+	t.Parallel()
+	body := `{"duration":4,"segments":[{"start":0,"end":0.4,"text":"Hi"},{"start":0.5,"end":0.9,"text":"there"}],` +
+		`"text":"<|speaker:0|> Hi there. <|speaker:1|> [laughter] <|speaker:0|> Okay"}`
+	adapter, endpoint := batchServer(t, body, nil)
+	diarize := true
+	result, err := transcribe(t, adapter, endpoint, BatchModel, protocol.RequestOptions{STT: &protocol.SttOptions{Diarization: &diarize}})
+	if err != nil {
+		t.Fatalf("transcribe: %v", err)
+	}
+	want := []runtimepkg.BatchSegment{
+		{Text: "Hi there.", StartMS: 0, EndMS: 900, Speaker: "0"},
+		{Text: "[laughter]", StartMS: 900, EndMS: 900, Speaker: "1"},
+		{Text: "Okay", StartMS: 900, EndMS: 900, Speaker: "0"},
+	}
+	if len(result.Segments) != len(want) {
+		t.Fatalf("segments = %+v", result.Segments)
+	}
+	for i := range want {
+		if result.Segments[i] != want[i] {
+			t.Fatalf("segment %d = %+v, want %+v", i, result.Segments[i], want[i])
+		}
+	}
+}
+
+func TestBatchRefusesAnEmptySuccessBody(t *testing.T) {
+	t.Parallel()
+	adapter, endpoint := batchServer(t, `{}`, nil)
+	_, err := transcribe(t, adapter, endpoint, BatchModelStandard, protocol.RequestOptions{})
+	var providerErr *runtimepkg.ProviderError
+	if !errors.As(err, &providerErr) || providerErr.Code != batchhttp.CodeProviderError {
+		t.Fatalf("empty body: %v", err)
+	}
+}
+
+// Fish takes only a language hint. Every other ask is refused before upload
+// rather than silently dropped.
+func TestBatchRefusesAsksFishCannotHonour(t *testing.T) {
+	t.Parallel()
+	on := true
+	cases := map[string]struct {
+		model   string
+		options protocol.RequestOptions
+	}{
+		"diarization on transcribe-1": {BatchModelStandard, protocol.RequestOptions{STT: &protocol.SttOptions{Diarization: &on}}},
+		"keywords":                    {BatchModel, protocol.RequestOptions{STT: &protocol.SttOptions{Keywords: []string{"Speko"}}}},
+		"noise reduction":             {BatchModel, protocol.RequestOptions{STT: &protocol.SttOptions{NoiseReduction: &on}}},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			var calls atomic.Int32
+			adapter, endpoint := batchServer(t, proResponse, func(*http.Request) { calls.Add(1) })
+			_, err := transcribe(t, adapter, endpoint, c.model, c.options)
+			var providerErr *runtimepkg.ProviderError
+			if !errors.As(err, &providerErr) || providerErr.Code != batchhttp.CodeInvalidRequest {
+				t.Fatalf("err = %v, want invalid_request", err)
+			}
+			if calls.Load() != 0 {
+				t.Fatal("request sent for an ask Fish cannot honour")
+			}
+		})
+	}
+}
+
+func TestBatchRefusesAnotherPathOnTheFishHost(t *testing.T) {
+	t.Parallel()
+	var calls atomic.Int32
+	adapter, endpoint := batchServer(t, proResponse, func(*http.Request) { calls.Add(1) })
+	if _, err := transcribe(t, adapter, strings.TrimSuffix(endpoint, "/v1/asr")+"/v1/tts", BatchModel, protocol.RequestOptions{}); err == nil {
+		t.Fatal("a route to /v1/tts was accepted")
+	}
+	if calls.Load() != 0 {
+		t.Fatal("request sent to the wrong path")
+	}
+}
+
+func TestBatchRefusesAudioOverTheDurationLimit(t *testing.T) {
+	t.Parallel()
+	adapter, endpoint := batchServer(t, proResponse, nil)
+	media := protocol.MediaFormat{Encoding: "pcm_s16le", SampleRateHz: 16_000, Channels: 1}
+	bytes := int64(44 + (BatchMaxDurationSeconds+1)*32_000)
+	_, err := adapter.Transcribe(context.Background(), runtimepkg.BatchTranscribeRequest{
+		Plan: batchPlan(endpoint, BatchModel), Media: media, Audio: strings.NewReader("RIFF"), AudioBytes: bytes,
+	})
+	var providerErr *runtimepkg.ProviderError
+	if !errors.As(err, &providerErr) || providerErr.Code != batchhttp.CodeInputTooLarge {
+		t.Fatalf("over-long recording: %v", err)
+	}
+}
