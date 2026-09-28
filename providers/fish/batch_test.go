@@ -373,12 +373,26 @@ func TestBatchRefusesAudioOverTheDurationLimit(t *testing.T) {
 	t.Parallel()
 	adapter, endpoint := batchServer(t, proResponse, nil)
 	media := protocol.MediaFormat{Encoding: "pcm_s16le", SampleRateHz: 16_000, Channels: 1}
-	bytes := int64(44 + (BatchMaxDurationSeconds+1)*32_000)
+	bytes := int64(wavHeaderAllowance + (BatchMaxDurationSeconds+1)*32_000)
 	_, err := adapter.Transcribe(context.Background(), runtimepkg.BatchTranscribeRequest{
 		Plan: batchPlan(endpoint, BatchModel), Media: media, Audio: strings.NewReader("RIFF"), AudioBytes: bytes,
 	})
 	var providerErr *runtimepkg.ProviderError
 	if !errors.As(err, &providerErr) || providerErr.Code != batchhttp.CodeInputTooLarge {
 		t.Fatalf("over-long recording: %v", err)
+	}
+}
+
+// A recording exactly at the limit with a longer-than-canonical header (a
+// LIST chunk, say) is still accepted.
+func TestBatchAcceptsAChunkAtTheLimitWithALongHeader(t *testing.T) {
+	t.Parallel()
+	adapter, endpoint := batchServer(t, proResponse, nil)
+	media := protocol.MediaFormat{Encoding: "pcm_s16le", SampleRateHz: 16_000, Channels: 1}
+	bytes := int64(4096 + BatchMaxDurationSeconds*32_000)
+	if _, err := adapter.Transcribe(context.Background(), runtimepkg.BatchTranscribeRequest{
+		Plan: batchPlan(endpoint, BatchModel), Media: media, Audio: strings.NewReader("RIFF"), AudioBytes: bytes,
+	}); err != nil {
+		t.Fatalf("a %d s chunk with a 4 KiB header was refused: %v", BatchMaxDurationSeconds, err)
 	}
 }

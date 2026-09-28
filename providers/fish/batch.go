@@ -359,14 +359,20 @@ func checkOptions(model string, options protocol.RequestOptions) error {
 	return nil
 }
 
-// pcmSeconds is the recording's duration from its byte length, or zero when
-// the format does not say.
+// wavHeaderAllowance is the most container overhead a WAV may carry before
+// its samples. The canonical header is 44 bytes, but LIST/fact chunks add
+// more, so the duration check counts audio only after this allowance: a valid
+// chunk split at the limit is never refused for its header.
+const wavHeaderAllowance = 16 << 10
+
+// pcmSeconds is a lower bound on the recording's duration from its byte
+// length, or zero when the format does not say.
 func pcmSeconds(media protocol.MediaFormat, audioBytes int64) float64 {
 	perSecond := int64(media.SampleRateHz) * int64(media.Channels) * 2
-	if perSecond <= 0 || audioBytes <= 44 {
+	if perSecond <= 0 || audioBytes <= wavHeaderAllowance {
 		return 0
 	}
-	return float64(audioBytes-44) / float64(perSecond)
+	return float64(audioBytes-wavHeaderAllowance) / float64(perSecond)
 }
 
 func baseLanguage(language string) string {
