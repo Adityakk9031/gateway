@@ -104,16 +104,16 @@ func TestDialogueAdapterRegistersOneVoiceAndFlushesWithoutClosing(t *testing.T) 
 	}
 }
 
-// A non-v3 model must never reach this socket: it is the text-to-speech
-// adapter's job, and the split has to fail loudly rather than dial a path the
-// vendor will reject.
-func TestDialogueAdapterServesOnlyV3Models(t *testing.T) {
+// A model outside the v3/v4 families must never reach this socket: it is the
+// text-to-speech adapter's job, and the vendor answers it here with HTTP 403,
+// so the split has to fail loudly rather than dial a path that will refuse it.
+func TestDialogueAdapterServesOnlyDialogueFamilies(t *testing.T) {
 	t.Parallel()
 	adapter, err := NewDialogue(testConfig("http://127.0.0.1:1"))
 	if err != nil {
 		t.Fatalf("new dialogue adapter: %v", err)
 	}
-	for _, model := range []string{"eleven_flash_v2_5", "eleven_multilingual_v2", "eleven_v4", "eleven_v4_turbo", "auto", ""} {
+	for _, model := range []string{"eleven_flash_v2_5", "eleven_multilingual_v2", "eleven_turbo_v2_5", "auto", ""} {
 		if ServesModel(model) {
 			t.Fatalf("ServesModel(%q) = true, want false", model)
 		}
@@ -125,9 +125,31 @@ func TestDialogueAdapterServesOnlyV3Models(t *testing.T) {
 			t.Fatalf("error leaked the credential: %v", err)
 		}
 	}
-	for _, model := range []string{"eleven_v3", "eleven_v3_conversational"} {
+	for _, model := range []string{"eleven_v3", "eleven_v3_conversational", "eleven_v4", "eleven_v4_turbo"} {
 		if !ServesModel(model) {
 			t.Fatalf("ServesModel(%q) = false, want true", model)
+		}
+	}
+}
+
+// v4 streams ONLY on this socket: the text-to-speech socket answers
+// eleven_v4 and eleven_v4_turbo with HTTP 400 unsupported_model, "Use the
+// text-to-dialogue websocket endpoint instead" (verified live 2026-09-28).
+func TestDialogueSocketServesV4Family(t *testing.T) {
+	t.Parallel()
+	adapter, err := NewDialogue(Config{})
+	if err != nil {
+		t.Fatalf("new dialogue adapter: %v", err)
+	}
+	media := protocol.MediaFormat{Encoding: "pcm_s16le", SampleRateHz: 24_000, Channels: 1}
+	for _, model := range []string{"eleven_v4", "eleven_v4_turbo"} {
+		raw, err := dialogueSocket(adapter.endpointPolicy, "wss://api.elevenlabs.io"+dialogueEndpoint, model, media)
+		if err != nil {
+			t.Fatalf("%s: %v", model, err)
+		}
+		endpoint, _ := url.Parse(raw)
+		if endpoint.Path != dialogueEndpoint || endpoint.Query().Get("model_id") != model || endpoint.Query().Get("output_format") != "pcm_24000" {
+			t.Fatalf("%s endpoint = %s", model, raw)
 		}
 	}
 }
