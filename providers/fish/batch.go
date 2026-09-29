@@ -353,6 +353,8 @@ func checkOptions(model string, options protocol.RequestOptions) error {
 		return &runtimepkg.ProviderError{Code: batchhttp.CodeInvalidRequest, Message: "Fish ASR takes no keyword list", Hint: "Drop the keywords option or choose a provider that supports vocabulary biasing."}
 	case stt.ReduceNoise():
 		return &runtimepkg.ProviderError{Code: batchhttp.CodeInvalidRequest, Message: "Fish ASR has no noise-reduction option", Hint: "Drop the noise-reduction option."}
+	case stt.TranslationTarget() != "":
+		return &runtimepkg.ProviderError{Code: batchhttp.CodeInvalidRequest, Message: "Fish ASR does not translate", Hint: "Drop the translation option or choose a provider that translates."}
 	case len(stt.ProviderKeys("fish")) > 0:
 		return &runtimepkg.ProviderError{Code: batchhttp.CodeInvalidRequest, Message: "Fish ASR takes no provider-specific settings"}
 	}

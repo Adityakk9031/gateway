@@ -339,6 +339,7 @@ func TestBatchRefusesAsksFishCannotHonour(t *testing.T) {
 		"diarization on transcribe-1": {BatchModelStandard, protocol.RequestOptions{STT: &protocol.SttOptions{Diarization: &on}}},
 		"keywords":                    {BatchModel, protocol.RequestOptions{STT: &protocol.SttOptions{Keywords: []string{"Speko"}}}},
 		"noise reduction":             {BatchModel, protocol.RequestOptions{STT: &protocol.SttOptions{NoiseReduction: &on}}},
+		"translation":                 {BatchModel, protocol.RequestOptions{STT: &protocol.SttOptions{Translation: &protocol.SttTranslation{TargetLanguage: "es"}}}},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
