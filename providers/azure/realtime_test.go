@@ -494,3 +494,80 @@ func TestRealtimeRecognizesTheLiveEmptyCommitRefusal(t *testing.T) {
 		t.Fatal("the live empty-commit refusal is not recognized")
 	}
 }
+
+func openRealtimeWithCloseTimeout(t *testing.T, serverURL string, closeTimeout time.Duration) runtimepkg.ProviderStream {
+	t.Helper()
+	endpoint, _ := url.Parse(serverURL)
+	adapter, err := NewRealtime(RealtimeConfig{AllowedEndpointHosts: []string{endpoint.Hostname()}, AllowInsecureEndpoint: true, CloseTimeout: closeTimeout})
+	if err != nil {
+		t.Fatalf("NewRealtime: %v", err)
+	}
+	stream, err := adapter.Open(context.Background(), realtimeRequest(serverURL))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	return stream
+}
+
+func terminalError(t *testing.T, events <-chan runtimepkg.ProviderEvent) error {
+	t.Helper()
+	timeout := time.After(3 * time.Second)
+	for {
+		select {
+		case event, ok := <-events:
+			if !ok {
+				return nil
+			}
+			if event.Err != nil {
+				return event.Err
+			}
+		case <-timeout:
+			t.Fatal("stream neither failed nor closed")
+			return nil
+		}
+	}
+}
+
+// Azure owes a final for the commit Close sent and never sends it. Close
+// must not park the caller until the session lease runs out: the stream
+// fails with an error naming the missing final once CloseTimeout passes.
+func TestRealtimeCloseBoundsTheWaitForAMissingFinal(t *testing.T) {
+	t.Parallel()
+	server := newFakeRealtime(t, &fakeRealtime{}) // never answers a commit
+	stream := openRealtimeWithCloseTimeout(t, server.URL, 200*time.Millisecond)
+	_ = stream.WriteAudio(context.Background(), make([]byte, 3200))
+	started := time.Now()
+	if err := stream.Close(context.Background()); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	err := terminalError(t, stream.Events())
+	var providerErr *runtimepkg.ProviderError
+	if !errors.As(err, &providerErr) || !strings.Contains(providerErr.Message, "no final") {
+		t.Fatalf("err = %v, want a missing-final provider error", err)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("Close waited %s for a final it was never sent", elapsed)
+	}
+	_ = stream.(runtimepkg.AbortingProviderStream).Abort(context.Background())
+}
+
+// A socket that ends after Close while a final is still owed lost the
+// caller's last words; ending Events cleanly would report that as success.
+func TestRealtimeDisconnectWhileAFinalIsOwedIsAnError(t *testing.T) {
+	t.Parallel()
+	fake := &fakeRealtime{onCommit: func(_ context.Context, conn *websocket.Conn, _ int) {
+		_ = conn.Close(websocket.StatusNormalClosure, "bye")
+	}}
+	server := newFakeRealtime(t, fake)
+	stream := openRealtimeWithCloseTimeout(t, server.URL, 5*time.Second)
+	_ = stream.WriteAudio(context.Background(), make([]byte, 3200))
+	if err := stream.Close(context.Background()); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	err := terminalError(t, stream.Events())
+	var providerErr *runtimepkg.ProviderError
+	if !errors.As(err, &providerErr) || !strings.Contains(providerErr.Message, "before the final") {
+		t.Fatalf("err = %v, want a lost-final provider error", err)
+	}
+	_ = stream.(runtimepkg.AbortingProviderStream).Abort(context.Background())
+}

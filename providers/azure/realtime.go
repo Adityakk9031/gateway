@@ -43,6 +43,11 @@ const (
 	// realtimeHandshakeTimeout bounds the wait for session.updated when the
 	// caller's context carries no deadline of its own.
 	realtimeHandshakeTimeout = 10 * time.Second
+	// realtimeDefaultCloseTimeout bounds how long Close keeps the stream open
+	// for finals still owed to commits. Live, `completed` landed within a
+	// second of its commit; ten leaves room without parking a caller until
+	// the session lease runs out.
+	realtimeDefaultCloseTimeout = 10 * time.Second
 )
 
 // realtimeModels are the deployments this adapter opens.
@@ -55,10 +60,14 @@ var realtimeSampleRates = map[int]struct{}{16_000: {}, 24_000: {}}
 // RealtimeConfig controls local transport limits. Credentials and provider
 // selection always come from the signed session plan.
 type RealtimeConfig struct {
-	AdapterID             string
-	HTTPClient            *http.Client
-	EventBuffer           int
-	MaxMessageBytes       int64
+	AdapterID       string
+	HTTPClient      *http.Client
+	EventBuffer     int
+	MaxMessageBytes int64
+	// CloseTimeout bounds the wait, after Close, for finals owed to commits.
+	// When it passes the stream ends with a provider error naming the
+	// missing final instead of waiting for the session lease.
+	CloseTimeout          time.Duration
 	AllowedEndpointHosts  []string
 	AllowInsecureEndpoint bool
 }
@@ -70,6 +79,7 @@ type RealtimeAdapter struct {
 	httpClient      *http.Client
 	eventBuffer     int
 	maxMessageBytes int64
+	closeTimeout    time.Duration
 	endpointPolicy  upstream.WebSocketPolicy
 }
 
@@ -84,8 +94,14 @@ func NewRealtime(config RealtimeConfig) (*RealtimeAdapter, error) {
 	if config.MaxMessageBytes == 0 {
 		config.MaxMessageBytes = 1 << 20
 	}
+	if config.CloseTimeout == 0 {
+		config.CloseTimeout = realtimeDefaultCloseTimeout
+	}
 	if config.EventBuffer < 1 {
 		return nil, errors.New("azure realtime event buffer must be positive")
+	}
+	if config.CloseTimeout < 0 {
+		return nil, errors.New("azure realtime close timeout must be positive")
 	}
 	if config.MaxMessageBytes < 1 {
 		return nil, errors.New("azure realtime maximum message bytes must be positive")
@@ -94,7 +110,7 @@ func NewRealtime(config RealtimeConfig) (*RealtimeAdapter, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &RealtimeAdapter{id: config.AdapterID, httpClient: config.HTTPClient, eventBuffer: config.EventBuffer, maxMessageBytes: config.MaxMessageBytes, endpointPolicy: policy}, nil
+	return &RealtimeAdapter{id: config.AdapterID, httpClient: config.HTTPClient, eventBuffer: config.EventBuffer, maxMessageBytes: config.MaxMessageBytes, closeTimeout: config.CloseTimeout, endpointPolicy: policy}, nil
 }
 
 func (a *RealtimeAdapter) ID() string { return a.id }
@@ -180,7 +196,7 @@ func (a *RealtimeAdapter) Open(ctx context.Context, request runtimepkg.AdapterRe
 		return nil, err
 	}
 	streamCtx, cancel := context.WithCancel(context.Background())
-	stream := &realtimeStream{conn: conn, ctx: streamCtx, cancel: cancel, events: make(chan runtimepkg.ProviderEvent, a.eventBuffer), sessionID: sessionID}
+	stream := &realtimeStream{conn: conn, ctx: streamCtx, cancel: cancel, events: make(chan runtimepkg.ProviderEvent, a.eventBuffer), sessionID: sessionID, closeTimeout: a.closeTimeout}
 	go stream.readLoop()
 	return stream, nil
 }
@@ -268,6 +284,12 @@ type realtimeStream struct {
 	// Close can commit trailing audio while the runtime's own last commit is
 	// still unanswered; Close keeps the read loop alive while it is positive.
 	outstandingCommits atomic.Int32
+	// closeTimeout bounds Close's wait for owed finals; finalTimedOut records
+	// that it passed, so the read loop — the only goroutine that emits —
+	// reports the missing final when the socket it was blocked on is closed
+	// under it.
+	closeTimeout  time.Duration
+	finalTimedOut atomic.Bool
 	// committed is the finalized text of the open commit window (the
 	// concatenated delta events) and provisional the latest intermediate
 	// suffix after it. Both are owned solely by readLoop.
@@ -341,6 +363,17 @@ func (s *realtimeStream) Close(ctx context.Context) error {
 		// delivering the final.
 		if s.closeErr != nil || s.outstandingCommits.Load() <= 0 {
 			s.cancel()
+		} else if s.closeTimeout > 0 {
+			// Bound the wait: Azure owes a final it may never send. The timer
+			// does not emit (the read loop owns the channel and may already
+			// have closed it); it closes the socket, and the read loop turns
+			// the failed read into the error.
+			time.AfterFunc(s.closeTimeout, func() {
+				if s.outstandingCommits.Load() > 0 && s.ctx.Err() == nil {
+					s.finalTimedOut.Store(true)
+					_ = s.conn.CloseNow()
+				}
+			})
 		}
 		if s.closeErr != nil {
 			_ = s.abort()
@@ -388,8 +421,18 @@ func (s *realtimeStream) readLoop() {
 	for {
 		messageType, payload, err := s.conn.Read(s.ctx)
 		if err != nil {
-			if !s.closed.Load() && !realtimeIsNormalClose(err) && s.ctx.Err() == nil {
-				s.emit(runtimepkg.ProviderEvent{Err: &runtimepkg.ProviderError{Code: "provider_unavailable", Message: "Azure MAI Realtime read failed", Retryable: true, Cause: err}})
+			if s.ctx.Err() == nil {
+				switch {
+				case s.finalTimedOut.Load():
+					s.emit(runtimepkg.ProviderEvent{Err: &runtimepkg.ProviderError{Code: "provider_unavailable", Message: fmt.Sprintf("Azure MAI Realtime sent no final for committed audio within %s of close", s.closeTimeout), Retryable: true, Cause: context.DeadlineExceeded}})
+				case s.outstandingCommits.Load() > 0:
+					// Even after Close: a socket that ends while a final is still
+					// owed lost the caller's last words, and ending Events
+					// cleanly would report that as success.
+					s.emit(runtimepkg.ProviderEvent{Err: &runtimepkg.ProviderError{Code: "provider_unavailable", Message: "Azure MAI Realtime closed before the final for committed audio arrived", Retryable: true, Cause: err}})
+				case !s.closed.Load() && !realtimeIsNormalClose(err):
+					s.emit(runtimepkg.ProviderEvent{Err: &runtimepkg.ProviderError{Code: "provider_unavailable", Message: "Azure MAI Realtime read failed", Retryable: true, Cause: err}})
+				}
 			}
 			return
 		}

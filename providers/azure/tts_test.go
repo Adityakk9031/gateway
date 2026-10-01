@@ -290,3 +290,58 @@ func TestTTSRefusesAnOversizedUtteranceBeforeDialing(t *testing.T) {
 	}
 	_ = stream.Close(context.Background())
 }
+
+// The caller's cancellation must stop a synthesis whose response headers have
+// not arrived, rather than leave the HTTP call running until shutdown.
+func TestTTSCommitTextHonoursTheCallersCancellation(t *testing.T) {
+	t.Parallel()
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		select {
+		case <-request.Context().Done():
+		case <-release:
+		}
+	}))
+	t.Cleanup(func() { close(release); server.Close() })
+	stream, err := ttsAdapterFor(t, server).Open(context.Background(), ttsRequest(server.URL, TTSModelMAIVoice21Flash, ""))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	_ = stream.AppendText(context.Background(), "hello")
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	err = stream.CommitText(ctx)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("CommitText err = %v, want the caller's deadline", err)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("CommitText ran %s past its caller's deadline", elapsed)
+	}
+	_ = stream.Close(context.Background())
+}
+
+// A body cut mid-sample is damaged audio, not a completed utterance.
+func TestTTSReportsAResponseCutMidSample(t *testing.T) {
+	t.Parallel()
+	server, _ := newFakeSynthesis(t, http.StatusOK, "audio/basic", []byte{1, 2, 3})
+	stream, err := ttsAdapterFor(t, server).Open(context.Background(), ttsRequest(server.URL, TTSModelMAIVoice21, ""))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	_ = stream.AppendText(context.Background(), "hello")
+	if err := stream.CommitText(context.Background()); err != nil {
+		t.Fatalf("CommitText: %v", err)
+	}
+	events, err := drainTTS(t, stream.Events())
+	var providerErr *runtimepkg.ProviderError
+	if !errors.As(err, &providerErr) || !strings.Contains(providerErr.Message, "mid-sample") {
+		t.Fatalf("err = %v, want a mid-sample provider error", err)
+	}
+	for _, event := range events {
+		if event.Type == protocol.EventAudioDone {
+			t.Fatal("a truncated body was reported as audio.done")
+		}
+	}
+	_ = stream.Close(context.Background())
+}

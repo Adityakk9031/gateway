@@ -346,7 +346,12 @@ func (s *ttsStream) CommitText(ctx context.Context) error {
 	request.Header.Set("Content-Type", "application/ssml+xml")
 	request.Header.Set("X-Microsoft-OutputFormat", s.outputFormat)
 	request.Header.Set("User-Agent", ttsUserAgent)
+	// The request runs on the stream's context so a response body outlives
+	// this call, but the caller's cancellation must still stop a request
+	// whose headers have not arrived: the commit's ctx is bound until then.
+	stopBinding := context.AfterFunc(ctx, requestCancel)
 	response, err := s.httpClient.Do(request)
+	stopBinding()
 	if err != nil {
 		s.abandonRequest(requestCancel, done)
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -471,6 +476,13 @@ func (s *ttsStream) readResponse(requestCtx context.Context, response *http.Resp
 				}
 				if !started {
 					s.emit(requestCtx, runtimepkg.ProviderEvent{Err: &runtimepkg.ProviderError{Code: batchhttp.CodeUnavailable, Message: "Azure TTS completed without returning audio", Retryable: true}})
+					return
+				}
+				// 16-bit PCM is whole samples; a dangling byte means the body
+				// was cut mid-sample, and audio.done would present damaged
+				// audio as complete.
+				if len(carry) != 0 {
+					s.emit(requestCtx, runtimepkg.ProviderEvent{Err: &runtimepkg.ProviderError{Code: batchhttp.CodeUnavailable, Message: "Azure TTS response ended mid-sample", Retryable: true}})
 					return
 				}
 				s.emit(requestCtx, runtimepkg.ProviderEvent{Type: protocol.EventAudioDone, Data: marshalTTSData(map[string]any{"provider_request_id": requestID})})
