@@ -207,20 +207,52 @@ func acceptableRealtimeCredential(route protocol.ProviderRoute, kind protocol.Cr
 	return kind == protocol.CredentialBearer || (route == protocol.RouteSpekoRelay && kind == protocol.CredentialRelayAccess)
 }
 
-// realtimeLanguage is the optional language hint: one bare code from the
-// same sixty-language table as the batch model, or null for the model's own
-// multilingual detection. The service treats an unrecognized value as unset,
-// so dropping one here changes nothing on the wire but keeps the request
-// honest about what was asked for.
+// realtimeLanguages is the language enum the Realtime session actually
+// validates, transcribed from the service's own refusal (2026-10-02, live):
+// "Invalid type for 'session.audio.input.transcription.language': expected
+// one of 'af', 'ar', ... 'zh'". It is NOT the sixty-code table the docs list
+// for the model: it spells Filipino `tl` and Norwegian `no` (the batch table
+// says fil and nb), adds be/cy/hr/iw/mi/sr, and lacks as, bn, gu, ml, or, pa,
+// te and yue. A value outside it fails the whole session with a 400, so the
+// hint is mapped onto it or dropped.
+var realtimeLanguages = map[string]struct{}{
+	"af": {}, "ar": {}, "az": {}, "be": {}, "bg": {}, "bs": {}, "ca": {}, "cs": {}, "cy": {}, "da": {},
+	"de": {}, "el": {}, "en": {}, "es": {}, "et": {}, "fa": {}, "fi": {}, "fr": {}, "gl": {}, "he": {},
+	"hi": {}, "hr": {}, "hu": {}, "hy": {}, "id": {}, "is": {}, "it": {}, "iw": {}, "ja": {}, "kk": {},
+	"kn": {}, "ko": {}, "lt": {}, "lv": {}, "mi": {}, "mk": {}, "mr": {}, "ms": {}, "ne": {}, "nl": {},
+	"no": {}, "pl": {}, "pt": {}, "ro": {}, "ru": {}, "sk": {}, "sl": {}, "sr": {}, "sv": {}, "sw": {},
+	"ta": {}, "th": {}, "tl": {}, "tr": {}, "uk": {}, "ur": {}, "vi": {}, "zh": {},
+}
+
+// realtimeLanguageAliases folds the spellings callers send onto the enum's.
+var realtimeLanguageAliases = map[string]string{
+	"fil": "tl",
+	"nb":  "no",
+	"nn":  "no",
+	"in":  "id", // Indonesian, pre-1989 code
+	"cmn": "zh",
+}
+
+// realtimeLanguage is the optional language hint: one code from the enum the
+// session accepts, or nil to OMIT the field and let the model detect the
+// language. Omission is the only auto-detect spelling: despite the docs, the
+// service refuses an explicit `"language": null` with the same 400 as an
+// unknown code, so nil must never reach the wire as null.
 func realtimeLanguage(language string) *string {
-	if strings.EqualFold(strings.TrimSpace(language), "auto") {
+	primary := strings.ToLower(strings.TrimSpace(language))
+	if primary == "" || primary == "auto" {
 		return nil
 	}
-	code := locale(language)
-	if code == "" {
+	if index := strings.IndexAny(primary, "-_"); index > 0 {
+		primary = primary[:index]
+	}
+	if folded, ok := realtimeLanguageAliases[primary]; ok {
+		primary = folded
+	}
+	if _, ok := realtimeLanguages[primary]; !ok {
 		return nil
 	}
-	return &code
+	return &primary
 }
 
 // realtimeHandshake sends session.update and reads until session.updated.
@@ -656,8 +688,10 @@ type realtimeAudioFormat struct {
 }
 
 type realtimeTranscription struct {
-	Model    string  `json:"model"`
-	Language *string `json:"language"`
+	Model string `json:"model"`
+	// Language is omitted, never null, when there is no hint: the service
+	// refuses `"language": null` (see realtimeLanguage).
+	Language *string `json:"language,omitempty"`
 }
 
 type realtimeAppend struct {

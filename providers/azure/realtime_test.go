@@ -204,15 +204,44 @@ func TestRealtimeHandshakeConfiguresATranscriptionSession(t *testing.T) {
 	}
 }
 
-func TestRealtimeLanguageHintIsNullForAutoAndUnlistedCodes(t *testing.T) {
+// The session validates the hint against its own enum (read off the live
+// refusal, 2026-10-02), which is not the batch table: Filipino is `tl`,
+// Norwegian `no`, and Bengali, Cantonese and the other unlisted codes fail
+// the whole session, so they are dropped for auto-detection instead.
+func TestRealtimeLanguageHintFollowsTheLiveEnum(t *testing.T) {
 	t.Parallel()
-	for _, language := range []string{"", "auto", "xx-YY"} {
+	for _, language := range []string{"", "auto", "xx-YY", "bn", "yue", "te-IN", "pa"} {
 		if got := realtimeLanguage(language); got != nil {
-			t.Fatalf("realtimeLanguage(%q) = %q, want null", language, *got)
+			t.Fatalf("realtimeLanguage(%q) = %q, want it omitted", language, *got)
 		}
 	}
-	if got := realtimeLanguage("tl"); got == nil || *got != "fil" {
-		t.Fatalf("realtimeLanguage(tl) = %v", got)
+	for language, want := range map[string]string{
+		"en-US": "en", "pt_BR": "pt", "fil": "tl", "fil-PH": "tl", "tl": "tl",
+		"nb": "no", "nn-NO": "no", "he": "he", "iw": "iw", "cmn": "zh", "sr": "sr",
+	} {
+		if got := realtimeLanguage(language); got == nil || *got != want {
+			t.Fatalf("realtimeLanguage(%q) = %v, want %q", language, got, want)
+		}
+	}
+}
+
+// Live, the service refuses `"language": null` (contrary to the docs) with
+// the same 400 as an unknown code; auto-detection is the field's absence.
+func TestRealtimeSessionUpdateOmitsAnUnsetLanguage(t *testing.T) {
+	t.Parallel()
+	fake := &fakeRealtime{}
+	server := newFakeRealtime(t, fake)
+	request := realtimeRequest(server.URL)
+	request.Options.Language = ""
+	stream, err := realtimeAdapterFor(t, server.URL).Open(context.Background(), request)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = stream.(runtimepkg.AbortingProviderStream).Abort(context.Background()) }()
+	update := nextFrame(t, fake.frames, "session.update")
+	encoded, _ := json.Marshal(update)
+	if strings.Contains(string(encoded), `"language"`) {
+		t.Fatalf("session.update carries a language field without a hint: %s", encoded)
 	}
 }
 

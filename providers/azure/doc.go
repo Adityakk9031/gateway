@@ -24,7 +24,7 @@
 //     OpenAI-Realtime-like JSON.
 //   - session.update{session:{type:"transcription", audio:{input:{format:
 //     {type:"audio/pcm", rate:16000|24000}, transcription:{model:<deployment
-//     name>, language:<bare code>|null}, turn_detection:null,
+//     name>, language:<code> or omitted}, turn_detection:null,
 //     noise_reduction:null}}}} before any audio; settings lock at the first
 //     append.
 //   - input_audio_buffer.append carries base64 PCM16 mono. There is no
@@ -35,7 +35,9 @@
 //     delta, replacing the previous one; `completed` carries the commit
 //     window's transcript. No word timings, confidence or language ids.
 //   - Sessions last at most one hour. Sixty languages (the batch table), with
-//     multilingual auto-detection when language is null. Served globally from
+//     multilingual auto-detection when language is OMITTED — live, the
+//     service refuses an explicit null, and its language enum is not the
+//     batch table (tl, no; no as/bn/gu/ml/or/pa/te/yue). Served globally from
 //     swedencentral, centralus, southindia/southeastasia (eastus2 coming).
 //     Introductory price $0.54 per audio hour through 2026-12-31.
 //
