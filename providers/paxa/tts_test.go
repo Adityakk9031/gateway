@@ -145,6 +145,33 @@ func TestCommitTextSendsTheDocumentedRequestAndStripsTheWAVHeader(t *testing.T) 
 	}
 }
 
+func TestIdleCancelKeepsTheStreamOpen(t *testing.T) {
+	adapter, err := NewTTS(TTSConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream, err := adapter.Open(context.Background(), ttsRequest(testEndpoint, "en"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = stream.(runtimepkg.AbortingProviderStream).Abort(context.Background()) }()
+	if err := stream.Cancel(context.Background()); err != nil {
+		t.Fatalf("idle cancellation closed a live session: %v", err)
+	}
+	if err := stream.AppendText(context.Background(), "next turn"); err != nil {
+		t.Fatalf("session unusable after idle cancel: %v", err)
+	}
+	if err := stream.Cancel(context.Background()); err != nil {
+		t.Fatalf("buffered text cancellation: %v", err)
+	}
+	if err := stream.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.Cancel(context.Background()); !errors.Is(err, runtimepkg.ErrSessionClosed) {
+		t.Fatalf("closed session cancel=%v", err)
+	}
+}
+
 func TestLanguagePicksTheVoiceAndTheReadingLanguage(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
