@@ -86,6 +86,9 @@ plainly:
   is accepted, exactly as a synchronously fetched plan is. Prefetching changes
   when a plan arrives, not what is checked.
 - Unused plans are discarded at expiry and settle at zero.
+- Requests with a caller-selected `client_session_id` bypass the pool and fetch
+  a plan synchronously. Signed plan identities are never rewritten or shared
+  across different requested session IDs.
 
 Set `SPEKO_WARM_PLAN_TARGET=0` to disable prefetching and fetch every plan at
 session-create time. Sessions then pay a control-plane round trip before the

@@ -233,7 +233,7 @@ func (p *PlanPool) Run(ctx context.Context) {
 func (p *PlanPool) Warm(ctx context.Context, request protocol.SessionPlanRequest) error {
 	key, poolable := poolKeyFor(request)
 	if !poolable {
-		return errors.New("gateway: only managed provider-direct routes can be prefetched")
+		return errors.New("gateway: only managed provider-direct routes without a client session ID can be prefetched")
 	}
 	p.mu.Lock()
 	if _, known := p.routes[key]; !known {
@@ -375,6 +375,11 @@ func (p *PlanPool) prefetchRequest(request protocol.SessionPlanRequest) protocol
 // by LocalPlanner and already cost nothing, and a relay session is not what the
 // zero-overhead promise is about.
 func poolKeyFor(request protocol.SessionPlanRequest) (planKey, bool) {
+	// A signed prefetched plan owns its session ID; it cannot be rebound to
+	// a caller-selected ID. Fetch these requests synchronously.
+	if strings.TrimSpace(request.Request.ClientSessionID) != "" {
+		return planKey{}, false
+	}
 	if request.Execution.CredentialSource != protocol.CredentialsManaged {
 		return planKey{}, false
 	}
