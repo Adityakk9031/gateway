@@ -53,21 +53,58 @@ func (s TranscriptSegment) Validate() error {
 	return nil
 }
 
+// TranscriptWord is one word of the transcript with its own timing. Present
+// only when the request asked for word_timestamps and the routed model
+// advertises it; the vendor's own speaker label rides along when the request
+// also asked for diarization.
+type TranscriptWord struct {
+	Text    string `json:"text"`
+	StartMS int64  `json:"start_ms"`
+	EndMS   int64  `json:"end_ms"`
+	Speaker string `json:"speaker,omitempty"`
+}
+
+// Validate checks that the word is a non-negative, ordered range with text.
+func (w TranscriptWord) Validate() error {
+	if strings.TrimSpace(w.Text) == "" {
+		return fmt.Errorf("text is required")
+	}
+	if w.StartMS < 0 || w.EndMS < w.StartMS {
+		return fmt.Errorf("start_ms and end_ms must form a non-negative ordered range")
+	}
+	return nil
+}
+
 // TranscriptionResponse is the batch transcription result. Usage carries the
 // billed duration; there is deliberately no STT usage header.
 type TranscriptionResponse struct {
 	Text     string              `json:"text"`
 	Segments []TranscriptSegment `json:"segments,omitempty"`
-	Route    Route               `json:"route"`
-	Usage    Usage               `json:"usage"`
+	// Words are per-word timings, present only when word_timestamps was asked
+	// for. Omitted otherwise, so every existing response is byte-identical.
+	Words []TranscriptWord `json:"words,omitempty"`
+	// Translation is the transcript translated into
+	// options.translation.target_language, present only when translation
+	// was asked for. Text stays the ORIGINAL spoken words, so a caller that
+	// never asks reads a byte-identical response. Translated words carry no
+	// timings (the vendor generates them after the words they translate),
+	// so there are no translated segments.
+	Translation string `json:"translation,omitempty"`
+	Route       Route  `json:"route"`
+	Usage       Usage  `json:"usage"`
 }
 
-// Validate checks segments, route, and usage. Text may be empty: silent
-// audio legitimately transcribes to nothing.
+// Validate checks segments, words, route, and usage. Text may be empty:
+// silent audio legitimately transcribes to nothing.
 func (r TranscriptionResponse) Validate() error {
 	for i, segment := range r.Segments {
 		if err := segment.Validate(); err != nil {
 			return fmt.Errorf("segments[%d]: %w", i, err)
+		}
+	}
+	for i, word := range r.Words {
+		if err := word.Validate(); err != nil {
+			return fmt.Errorf("words[%d]: %w", i, err)
 		}
 	}
 	if err := r.Route.Validate(); err != nil {
@@ -191,15 +228,23 @@ func (e STTSessionReady) Validate() error {
 type STTTranscriptDelta struct {
 	Type STTEventType `json:"type"`
 	Text string       `json:"text"`
+	// Translation is the interim translation of the current span, present
+	// only on a session that asked for one. It trails Text: the vendor
+	// translates words after it recognises them, so a delta may carry
+	// original words whose translation has not arrived yet, or only a
+	// translation of words already recognised.
+	Translation string `json:"translation,omitempty"`
 }
 
 // Validate checks the frame tag and that the delta says something — empty
-// interim hypotheses are dropped at normalization, never forwarded.
+// interim hypotheses are dropped at normalization, never forwarded. On a
+// translating session a delta that advances only the translation is
+// something.
 func (e STTTranscriptDelta) Validate() error {
 	if e.Type != STTEventTranscriptDelta {
 		return fmt.Errorf("type: got %q, want %q", e.Type, STTEventTranscriptDelta)
 	}
-	if e.Text == "" {
+	if e.Text == "" && e.Translation == "" {
 		return fmt.Errorf("text: required")
 	}
 	return nil
@@ -214,6 +259,13 @@ type STTTranscriptFinal struct {
 	// Speaker labels the whole finalized turn; per-span attribution rides
 	// Segments[].Speaker.
 	Speaker string `json:"speaker,omitempty"`
+	// Translation is the finalized translation delivered with this span,
+	// present only on a session that asked for one. Text stays the original
+	// words. The vendor's translation trails its transcript, so the last
+	// words of a span can be translated in the NEXT final's Translation; a
+	// caller rendering captions concatenates finals rather than pairing them
+	// one to one.
+	Translation string `json:"translation,omitempty"`
 }
 
 // Validate checks the frame tag and segments. Text may be empty: a

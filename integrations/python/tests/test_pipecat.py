@@ -2,31 +2,58 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
 pytest.importorskip("pipecat")
 
+from pipecat.adapters.schemas.function_schema import FunctionSchema
+from pipecat.audio.turn.base_turn_analyzer import BaseTurnAnalyzer, EndOfTurnState
 from pipecat.frames.frames import (
+    ErrorFrame,
     InterimTranscriptionFrame,
+    STTMetadataFrame,
     TranscriptionFrame,
     TTSAudioRawFrame,
     TTSStoppedFrame,
+    VADUserStartedSpeakingFrame,
     VADUserStoppedSpeakingFrame,
 )
+from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.frame_processor import FrameDirection
+from pipecat.services.settings import LLMSettings, STTSettings, TTSSettings
 from pipecat.services.stt_service import STTService as PipecatSTTService
+from pipecat.turns.user_stop.turn_analyzer_user_turn_stop_strategy import (
+    TurnAnalyzerUserTurnStopStrategy,
+)
+from pipecat.utils.asyncio.task_manager import TaskManager
 
 from speko_gateway.client import (
     CanonicalEvent,
     SessionConfig,
 )
 from speko_gateway.pipecat import (
+    SpekoLLMService,
     SpekoSTTService,
     SpekoTTSService,
     _transcription_frame,
 )
+
+
+class FakeRelayClient:
+    def __init__(self, events: list[tuple[str, dict]] | None = None) -> None:
+        self.events = events or []
+        self.requests: list[dict] = []
+        self.closed = False
+
+    async def stream_response(self, request: dict):
+        self.requests.append(request)
+        for event in self.events:
+            yield event
+
+    async def aclose(self) -> None:
+        self.closed = True
 
 
 class FakeGatewaySession:
@@ -71,7 +98,7 @@ class FakeGatewaySession:
 
 
 class FakeGatewayClient:
-    def __init__(self, *sessions: FakeGatewaySession) -> None:
+    def __init__(self, *sessions: FakeGatewaySession | BaseException) -> None:
         self._sessions = list(sessions)
         self.ready_timeouts: list[float] = []
         self.opened: list[SessionConfig] = []
@@ -82,7 +109,10 @@ class FakeGatewayClient:
 
     async def open(self, config: SessionConfig) -> FakeGatewaySession:
         self.opened.append(config)
-        return self._sessions.pop(0)
+        result = self._sessions.pop(0)
+        if isinstance(result, BaseException):
+            raise result
+        return result
 
     async def aclose(self) -> None:
         self.closed = True
@@ -123,7 +153,167 @@ def test_transcription_events_map_to_native_pipecat_frames() -> None:
     assert final.result == {
         "provider_request_id": "req-1",
         "extensions": {"deepgram": {"words": []}},
+        "language": "en",
     }
+
+
+def test_transcription_uses_detected_language_when_gateway_supplies_it() -> None:
+    frame = _transcription_frame(
+        CanonicalEvent(
+            type="transcript.final",
+            data={"text": "Salom", "language": "uz"},
+        ),
+        user_id="caller",
+        language="en",
+    )
+    assert isinstance(frame, TranscriptionFrame)
+    assert frame.language is not None and frame.language.value == "uz"
+    assert frame.result["language"] == "uz"
+
+
+def test_llm_request_maps_universal_messages_and_full_tool_schema() -> None:
+    async def handler(_params) -> None:
+        return None
+
+    tool = FunctionSchema(
+        name="book_slot",
+        description="Book a slot",
+        properties={
+            "day": {"type": "string", "enum": ["monday", "tuesday"]},
+            "count": {"type": "integer", "minimum": 1},
+        },
+        required=["day"],
+        handler=handler,
+    )
+    context = LLMContext(
+        messages=[
+            {"role": "developer", "content": "Be concise"},
+            {"role": "user", "content": "Book Monday"},
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "book_slot", "arguments": '{"day":"monday"}'},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call-1", "content": "confirmed"},
+        ],
+        tools=[tool],
+    )
+    llm = SpekoLLMService(FakeRelayClient(), system_instruction="Base prompt")  # type: ignore[arg-type]
+
+    request = llm._request(context)
+
+    assert request["routing"] == {"mode": "auto", "objective": "balanced"}
+    assert request["input"] == [
+        {
+            "type": "message",
+            "role": "system",
+            "content": [{"type": "text", "text": "Base prompt"}],
+        },
+        {
+            "type": "message",
+            "role": "system",
+            "content": [{"type": "text", "text": "Be concise"}],
+        },
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "text", "text": "Book Monday"}],
+        },
+        {
+            "type": "function_call",
+            "call_id": "call-1",
+            "name": "book_slot",
+            "arguments": '{"day":"monday"}',
+        },
+        {"type": "function_result", "call_id": "call-1", "result": "confirmed"},
+    ]
+    assert request["tools"] == [
+        {
+            "name": "book_slot",
+            "description": "Book a slot",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "day": {"type": "string", "enum": ["monday", "tuesday"]},
+                    "count": {"type": "integer", "minimum": 1},
+                },
+                "required": ["day"],
+            },
+        }
+    ]
+
+
+async def test_llm_run_inference_collects_streamed_text() -> None:
+    relay = FakeRelayClient(
+        [
+            ("response.created", {"response_id": "response-1"}),
+            ("response.text.delta", {"delta": "CONVER"}),
+            ("response.text.delta", {"delta": "SATION"}),
+            ("response.completed", {"usage": {"input_tokens": 2, "output_tokens": 1}}),
+        ]
+    )
+    llm = SpekoLLMService(relay)  # type: ignore[arg-type]
+
+    result = await llm.run_inference(
+        LLMContext(messages=[{"role": "user", "content": "Classify"}]),
+        max_tokens=4,
+        system_instruction="Return one word",
+    )
+
+    assert result == "CONVERSATION"
+    assert relay.requests[0]["max_output_tokens"] == 4
+    assert relay.requests[0]["input"][0]["content"][0]["text"] == "Return one word"
+
+
+async def test_llm_typed_settings_updates_change_router_request() -> None:
+    llm = SpekoLLMService(  # type: ignore[arg-type]
+        FakeRelayClient(),
+        provider="openai",
+        model="gpt-default",
+        max_output_tokens=100,
+    )
+    await llm._update_settings(
+        LLMSettings(
+            model="gpt-node",
+            temperature=0.2,
+            top_p=0.8,
+            max_tokens=321,
+        )
+    )
+
+    request = llm._request(LLMContext(messages=[{"role": "user", "content": "Hi"}]))
+
+    assert request["routing"] == {
+        "mode": "explicit",
+        "provider": "openai",
+        "model": "gpt-node",
+    }
+    assert request["max_output_tokens"] == 321
+    assert request["temperature"] == 0.2
+    assert request["top_p"] == 0.8
+
+
+async def test_llm_settings_cannot_change_auto_route_mode() -> None:
+    auto = SpekoLLMService(FakeRelayClient())  # type: ignore[arg-type]
+    explicit = SpekoLLMService(  # type: ignore[arg-type]
+        FakeRelayClient(), provider="openai", model="gpt-default"
+    )
+
+    for service, model in ((auto, "gpt-node"), (explicit, "auto")):
+        try:
+            await service._update_settings(LLMSettings(model=model))
+        except ValueError as error:
+            assert "cannot change between auto and explicit routing" in str(error)
+        else:
+            raise AssertionError("expected route-mode update to be rejected")
+
+    assert auto._settings.model == "auto"
+    assert explicit._settings.model == "gpt-default"
 
 
 async def test_stt_streams_audio_and_commits_before_vad_stop() -> None:
@@ -155,6 +345,95 @@ async def test_stt_streams_audio_and_commits_before_vad_stop() -> None:
         "transport": "pipecat",
     }
 
+    await service._finish(graceful=False)
+
+
+def test_voice_services_initialize_complete_pipecat_settings() -> None:
+    session = FakeGatewaySession()
+    client = FakeGatewayClient(session)
+
+    stt = SpekoSTTService(  # type: ignore[arg-type]
+        client, model="nova-3", language="en"
+    )
+    tts = SpekoTTSService(  # type: ignore[arg-type]
+        client, model="sonic-3", voice="amy", language="en"
+    )
+
+    assert stt._settings == STTSettings(model="nova-3", language="en")
+    assert tts._settings == TTSSettings(model="sonic-3", voice="amy", language="en")
+
+
+def test_voice_services_honor_caller_supplied_pipecat_settings() -> None:
+    session = FakeGatewaySession()
+    client = FakeGatewayClient(session)
+
+    stt = SpekoSTTService(  # type: ignore[arg-type]
+        client, settings=STTSettings(model="whisper-1", language="fr")
+    )
+    tts = SpekoTTSService(  # type: ignore[arg-type]
+        client,
+        settings=TTSSettings(model="sonic-3", voice="amy", language="fr"),
+    )
+
+    assert stt._model == "whisper-1"
+    assert stt._language == "fr"
+    assert tts._model == "sonic-3"
+    assert tts._voice == "amy"
+    assert tts._language == "fr"
+
+
+async def test_stt_start_surfaces_gateway_admission_failure_as_fatal() -> None:
+    client = FakeGatewayClient(FakeGatewaySession())
+    service = SpekoSTTService(client)  # type: ignore[arg-type]
+    failure = GatewayError(
+        "Gateway rejected request (no_eligible_route, HTTP 422)",
+        code="no_eligible_route",
+        retryable=False,
+    )
+    service._connect = AsyncMock(side_effect=failure)  # type: ignore[method-assign]
+    service.push_error = AsyncMock()  # type: ignore[method-assign]
+
+    with patch.object(PipecatSTTService, "start", AsyncMock()):
+        await service.start(object())  # type: ignore[arg-type]
+
+    service.push_error.assert_awaited_once_with(
+        "Speko Gateway STT failed (no_eligible_route)",
+        exception=failure,
+        fatal=True,
+    )
+
+
+async def test_stt_can_fallback_to_managed_auto_when_explicit_route_is_ineligible(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SPEKO_API_KEY", "test-managed-key")
+    failure = GatewayError(
+        "Gateway rejected request (no_eligible_route, HTTP 422)",
+        code="no_eligible_route",
+        retryable=False,
+    )
+    session = FakeGatewaySession()
+    client = FakeGatewayClient(failure, session)
+    service = SpekoSTTService(  # type: ignore[arg-type]
+        client,
+        provider="meta",
+        model="muse-voice-transcribe-1.0",
+        credential_source="auto",
+        fallback_to_auto_on_no_eligible_route=True,
+        sample_rate=16_000,
+    )
+    service._sample_rate = 16_000
+
+    await service._connect()
+
+    assert [config.request for config in client.opened] == [
+        {
+            "provider": "meta",
+            "language": "en",
+            "model": "muse-voice-transcribe-1.0",
+        },
+        {"provider": "auto", "language": "en", "model": "auto"},
+    ]
     await service._finish(graceful=False)
 
 
@@ -202,6 +481,74 @@ async def test_tts_streams_sentences_in_one_turn_and_closes_context() -> None:
     assert client.ready_timeouts == [15.0]
 
 
+async def test_tts_admission_failure_is_fatal() -> None:
+    client = FakeGatewayClient(FakeGatewaySession())
+    service = SpekoTTSService(client)  # type: ignore[arg-type]
+    failure = GatewayError(
+        "Gateway rejected request (no_eligible_route, HTTP 422)",
+        code="no_eligible_route",
+        retryable=False,
+    )
+    service._context = AsyncMock(side_effect=failure)  # type: ignore[method-assign]
+
+    frames = await _run_once(service.run_tts("Hello", "turn-failed"))
+
+    error = next(frame for frame in frames if isinstance(frame, ErrorFrame))
+    assert error.fatal is True
+    assert error.error == "Speko Gateway TTS failed (no_eligible_route)"
+
+
+async def test_tts_can_fallback_to_managed_auto_without_vendor_voice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SPEKO_API_KEY", "test-managed-key")
+    failure = GatewayError(
+        "Gateway rejected request (no_eligible_route, HTTP 422)",
+        code="no_eligible_route",
+        retryable=False,
+    )
+    first = FakeGatewaySession()
+    second = FakeGatewaySession()
+    client = FakeGatewayClient(failure, first, second)
+    service = SpekoTTSService(  # type: ignore[arg-type]
+        client,
+        provider="openai",
+        model="gpt-4o-mini-tts",
+        voice="coral",
+        credential_source="auto",
+        fallback_to_auto_on_no_eligible_route=True,
+        sample_rate=24_000,
+    )
+    service._sample_rate = 24_000
+
+    first_state = await service._context("turn-1")
+    second_state = await service._context("turn-2")
+
+    assert [config.request for config in client.opened] == [
+        {
+            "provider": "openai",
+            "language": "en",
+            "model": "gpt-4o-mini-tts",
+            "max_input_characters": 100_000,
+            "voice": "coral",
+        },
+        {
+            "provider": "auto",
+            "language": "en",
+            "model": "auto",
+            "max_input_characters": 100_000,
+        },
+        {
+            "provider": "auto",
+            "language": "en",
+            "model": "auto",
+            "max_input_characters": 100_000,
+        },
+    ]
+    await service._close_state("turn-1", first_state, interrupted=True)
+    await service._close_state("turn-2", second_state, interrupted=True)
+
+
 async def test_tts_interruption_cancels_only_the_active_turn() -> None:
     session = FakeGatewaySession()
     client = FakeGatewayClient(session)
@@ -216,3 +563,193 @@ async def test_tts_interruption_cancels_only_the_active_turn() -> None:
     assert session.cancels == 1
     assert session.closed is True
     assert context_id not in service._contexts
+
+
+class SequentialTTSGatewaySession(FakeGatewaySession):
+    """A Gateway stream whose next utterance requires the previous audio.done."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.pending: asyncio.Queue[CanonicalEvent | None] = asyncio.Queue()
+        self.active = False
+        self.overlapped = False
+
+    async def append_text(self, text: str) -> None:
+        if self.active:
+            self.overlapped = True
+            await self.pending.put(
+                CanonicalEvent(
+                    type="error",
+                    data={"source": "runtime", "code": "internal"},
+                )
+            )
+        await super().append_text(text)
+
+    async def commit_text(self) -> None:
+        self.active = True
+        await super().commit_text()
+
+    async def complete_utterance(self) -> None:
+        self.active = False
+        await self.pending.put(CanonicalEvent(type="audio.done"))
+
+    async def finish(self) -> None:
+        await super().finish()
+        await self.pending.put(None)
+
+    async def events(self) -> AsyncIterator[CanonicalEvent]:
+        while (event := await self.pending.get()) is not None:
+            yield event
+
+
+async def test_tts_waits_for_audio_done_before_submitting_next_sentence() -> None:
+    session = SequentialTTSGatewaySession()
+    service = SpekoTTSService(FakeGatewayClient(session), sample_rate=24_000)
+    service._sample_rate = 24_000
+    service.push_error = AsyncMock()
+    context_id = "turn-sequential"
+    await service.create_audio_context(context_id)
+    await _run_once(service.run_tts("Hi there!", context_id))
+    state = service._contexts[context_id]
+    await session.pending.put(CanonicalEvent(type="audio.frame", audio=b"\x01\x00"))
+    # Audio must stream while synthesis is still in progress.
+    first_audio = await asyncio.wait_for(service._audio_contexts[context_id].get(), 2)
+    assert isinstance(first_audio, TTSAudioRawFrame)
+    second = asyncio.create_task(
+        _run_once(service.run_tts("Thanks for calling.", context_id))
+    )
+    try:
+        await asyncio.sleep(0)
+        assert not second.done()
+        assert session.appended_text == ["Hi there!"]
+        assert not session.overlapped
+        await session.complete_utterance()
+        assert await asyncio.wait_for(second, 2) == [None]
+        assert session.appended_text == ["Hi there!", "Thanks for calling."]
+        assert session.text_commits == 2
+        await session.complete_utterance()
+        await service.flush_audio(context_id)
+        await asyncio.wait_for(state.task, 2)
+        service.push_error.assert_not_awaited()
+        assert session.finishes == 1
+        assert session.closed
+    finally:
+        second.cancel()
+        await asyncio.gather(second, return_exceptions=True)
+        await service._finish_all(interrupted=True)
+
+
+@pytest.mark.parametrize("terminal", ["interrupt", "error", "eof"])
+async def test_tts_waiting_sentence_is_released_on_terminal_event(terminal: str) -> None:
+    session = SequentialTTSGatewaySession()
+    service = SpekoTTSService(FakeGatewayClient(session), sample_rate=24_000)
+    service._sample_rate = 24_000
+    service.push_error = AsyncMock()
+    context_id = "turn-terminal"
+    await service.create_audio_context(context_id)
+    await _run_once(service.run_tts("First sentence.", context_id))
+    state = service._contexts[context_id]
+    second = asyncio.create_task(
+        _run_once(service.run_tts("Queued sentence.", context_id))
+    )
+    try:
+        await asyncio.sleep(0)
+        assert not second.done()
+        if terminal == "interrupt":
+            await service.on_audio_context_interrupted(context_id)
+        elif terminal == "error":
+            await session.pending.put(
+                CanonicalEvent(
+                    type="error",
+                    data={"source": "provider", "code": "provider_unavailable"},
+                )
+            )
+        else:
+            await session.pending.put(None)
+        await asyncio.wait_for(second, 2)
+        await asyncio.wait_for(
+            asyncio.gather(state.task, return_exceptions=True), 2
+        )
+        assert state.task.done()
+        assert session.appended_text == ["First sentence."]
+        assert not session.overlapped
+        assert service.push_error.await_count == (1 if terminal == "error" else 0)
+    finally:
+        second.cancel()
+        await asyncio.gather(second, return_exceptions=True)
+        await service._finish_all(interrupted=True)
+
+
+@pytest.mark.parametrize("speech_final", [True, False, None])
+async def test_stt_completion_releases_turn_without_waiting_for_safety_timer(
+    speech_final: bool | None,
+) -> None:
+    # Exercise the Gateway receive loop and Pipecat's actual turn strategy.
+    # The analyzer verdict and safety timer are controlled independently: an
+    # utterance final must release the turn now, a stable chunk must still wait.
+    analyzer = Mock(spec=BaseTurnAnalyzer)
+    analyzer.analyze_end_of_turn = AsyncMock(
+        return_value=(EndOfTurnState.COMPLETE, None)
+    )
+    analyzer.cleanup = AsyncMock()
+    strategy = TurnAnalyzerUserTurnStopStrategy(turn_analyzer=analyzer)
+    await strategy.setup(TaskManager())
+    stopped = AsyncMock()
+    strategy.add_event_handler("on_user_turn_stopped", stopped)
+    timer = asyncio.Event()
+    timer_started = asyncio.Event()
+
+    async def pending_timer(_timeout: float) -> None:
+        timer_started.set()
+        await timer.wait()
+
+    data = {"text": "Hello there", "is_final": True}
+    if speech_final is not None:
+        data["speech_final"] = speech_final
+    session = FakeGatewaySession([
+        CanonicalEvent(type="transcript.final", data=data),
+        CanonicalEvent(type="speech.ended"),
+    ])
+    service = SpekoSTTService(FakeGatewayClient(session), sample_rate=16_000)
+    received = []
+
+    async def receive_frame(frame):
+        received.append(frame)
+        await strategy.process_frame(frame)
+
+    service.push_frame = AsyncMock(side_effect=receive_frame)
+    try:
+        with patch.object(strategy, "_timeout_handler", pending_timer):
+            await strategy.process_frame(
+                STTMetadataFrame(service_name="SpekoSTT", ttfs_p99_latency=1.0)
+            )
+            await strategy.process_frame(VADUserStartedSpeakingFrame(start_secs=0.2))
+            await strategy.process_frame(VADUserStoppedSpeakingFrame(stop_secs=0.2))
+            await timer_started.wait()
+            await service._connect()
+            await service._receive_task
+
+        assert [frame.text for frame in received] == ["Hello there"]
+        assert received[0].finalized is (speech_final is True)
+        if speech_final:
+            stopped.assert_awaited_once()
+        else:
+            stopped.assert_not_awaited()
+    finally:
+        await service.cleanup()
+        await strategy.cleanup()
+
+
+def test_cache_write_tokens_are_included_in_llm_usage() -> None:
+    from speko_gateway.pipecat import _llm_token_usage
+
+    usage = _llm_token_usage({
+        "input_tokens": 300,
+        "cached_input_tokens": 100,
+        "cache_write_5m_tokens": 11,
+        "cache_write_1h_tokens": 19,
+        "output_tokens": 34,
+    })
+    assert usage.prompt_tokens == 430
+    assert usage.cache_read_input_tokens == 100
+    assert usage.total_tokens == 464

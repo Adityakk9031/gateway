@@ -50,8 +50,12 @@ const (
 
 	// Wire literals from the generated Interactions types.
 	stepModelOutput    = "model_output"
+	stepUserInput      = "user_input"
 	contentText        = "text"
 	annotationWordInfo = "word_info"
+	// statusCompleted is the interaction's terminal status. Over speech-free
+	// audio it is the only evidence in the body that the model ran.
+	statusCompleted = "completed"
 )
 
 // batchModels are the model ids this endpoint serves. The live-only id is
@@ -133,6 +137,14 @@ func (a *BatchAdapter) Transcribe(ctx context.Context, request runtimepkg.BatchT
 	if request.AudioBytes > BatchMaxAudioBytes {
 		return nil, &runtimepkg.ProviderError{Code: batchhttp.CodeInputTooLarge, Message: "the upload exceeds the Gemini inline request limit"}
 	}
+	// Google refuses custom_vocabulary alongside the verbatim mode's speaker
+	// labels or word timings ("custom_vocabulary is incompatible with
+	// timestamps", HTTP 400, observed live 2026-09-05). Refuse here with the
+	// conflict named rather than sending a request the service rejects, and
+	// never drop one ask to satisfy the other.
+	if verbatimModeRequested(request.Options) && len(trimmedKeywords(request.Options.STT.GetKeywords())) > 0 {
+		return nil, &runtimepkg.ProviderError{Code: batchhttp.CodeInvalidRequest, Message: "Gemini cannot combine keywords with diarization or word timestamps; drop one of the asks"}
+	}
 	credential, err := batchhttp.Credential(request.Plan)
 	if err != nil {
 		return nil, err
@@ -188,17 +200,29 @@ func (a *BatchAdapter) Transcribe(ctx context.Context, request runtimepkg.BatchT
 	if err := batchhttp.DecodeJSON(response.Body, &decoded); err != nil {
 		return nil, err
 	}
-	text := decoded.transcript()
-	if text == "" {
-		return nil, batchhttp.Failed(batchExtensionID, "the response carried no transcript")
+	// A completed interaction reports status "completed", and over speech it
+	// also carries a model_output step (or at least the flat output_text). A
+	// 200 with none of those is a response shape this adapter does not
+	// understand, not silence — see interaction.completed.
+	if !decoded.completed() {
+		return nil, batchhttp.Malformed(fmt.Errorf("gemini interaction carries no model output (status %q)", decoded.Status))
 	}
+	// An empty transcript on a well-formed response is an empty success, not
+	// a failure: silent or speech-free audio legitimately yields no text, and
+	// the other batch adapters surface that as text "" rather than a
+	// provider error.
+	text := decoded.transcript()
+	words := decoded.words()
 	return &runtimepkg.BatchTranscription{
 		Text: text,
 		// Words are annotations on the transcript text, present only when the
 		// request asked for verbatim mode above. Absent, Segments stays empty,
 		// which BatchTranscription documents as the honest shape for untimed
 		// text.
-		Segments: batchhttp.GroupWords(decoded.words(), 0),
+		Segments: batchhttp.GroupWords(words, 0),
+		// Per-word timings surface only when the caller asked for them; a
+		// diarization-only request keeps its segments and nothing more.
+		Words: wordTimings(words, request.Options),
 		// DurationMS stays zero: the interaction's usage block reports tokens
 		// by modality and no audio duration at all, so the caller meters from
 		// the audio it sent rather than from a number this response invents.
@@ -232,17 +256,45 @@ func transcriptionConfig(options protocol.RequestOptions) map[string]any {
 			config["custom_vocabulary"] = keywords
 		}
 	}
-	if options.STT.Diarize() {
-		config["mode"] = map[string]any{
+	// Both asks ride the same verbatim mode object. Word timings are always
+	// requested inside it: diarization needs them to build speaker segments,
+	// and word_timestamps is nothing else. Which of the two the caller asked
+	// for decides what the RESULT exposes (see wordTimings), not the wire.
+	if verbatimModeRequested(options) {
+		mode := map[string]any{
 			"type":                    "verbatim",
-			"diarization_mode":        "speaker",
 			"timestamp_granularities": []string{"word"},
 		}
+		if options.STT.Diarize() {
+			mode["diarization_mode"] = "speaker"
+		}
+		config["mode"] = mode
 	}
 	if len(config) == 0 {
 		return nil
 	}
 	return config
+}
+
+// verbatimModeRequested reports whether the caller asked for something only
+// the verbatim mode carries: speaker labels or per-word timings.
+func verbatimModeRequested(options protocol.RequestOptions) bool {
+	return options.STT.Diarize() || options.STT.WantsWordTimestamps()
+}
+
+// wordTimings maps the annotations onto the result's Words when, and only
+// when, the caller asked for word_timestamps. Every word_info annotation
+// carries both offsets, so a word with none is a degraded reading (offsetMS
+// yields zero), kept rather than dropped so the word list stays complete.
+func wordTimings(words []batchhttp.Word, options protocol.RequestOptions) []runtimepkg.BatchWord {
+	if !options.STT.WantsWordTimestamps() || len(words) == 0 {
+		return nil
+	}
+	timed := make([]runtimepkg.BatchWord, 0, len(words))
+	for _, word := range words {
+		timed = append(timed, runtimepkg.BatchWord{Text: word.Text, StartMS: word.StartMS, EndMS: word.EndMS, Speaker: word.Speaker})
+	}
+	return timed
 }
 
 // interaction is the subset of the Interactions response this adapter reads.
@@ -254,6 +306,7 @@ func transcriptionConfig(options protocol.RequestOptions) map[string]any {
 // field still yields a transcript.
 type interaction struct {
 	ID         string `json:"id"`
+	Status     string `json:"status"`
 	OutputText string `json:"output_text"`
 	Steps      []struct {
 		Type    string `json:"type"`
@@ -269,6 +322,41 @@ type interaction struct {
 			} `json:"annotations"`
 		} `json:"content"`
 	} `json:"steps"`
+}
+
+// completed reports whether the interaction shows evidence the model ran.
+//
+// Speech-free audio decides the shape. A completed interaction over silence
+// carries no steps at all — no model_output step, no output_text — only
+// status "completed" and an audio-only usage block with zero output tokens
+// (measured 2026-09-09 against v1beta/interactions with 30 s of digital
+// silence and with a 30 s 440 Hz tone; the same request over speech returned
+// a model_output step). So a model_output step or output_text is sufficient
+// evidence but not necessary: the terminal status stands in for it when the
+// body carries no structured output at all.
+//
+// The status is NOT allowed to vouch for steps this decoder does not read. The
+// only step kinds it knows are user_input (the echoed request, which says
+// nothing about the output) and model_output. A completed interaction that
+// carries any other step kind is structured output the adapter does not
+// understand — a refusal, an error step, a future shape — and settling that
+// as an empty transcript would mask a real failure as silence. Such a body
+// stays a malformed refusal, with the status named.
+func (i interaction) completed() bool {
+	if i.OutputText != "" {
+		return true
+	}
+	unknownStep := false
+	for _, step := range i.Steps {
+		switch step.Type {
+		case stepModelOutput:
+			return true
+		case stepUserInput:
+		default:
+			unknownStep = true
+		}
+	}
+	return i.Status == statusCompleted && !unknownStep
 }
 
 func (i interaction) transcript() string {

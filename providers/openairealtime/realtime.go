@@ -25,9 +25,12 @@ const (
 	AdapterIDOpenAI = "openai.realtime.v1"
 	AdapterIDXAI    = "xai.realtime.v1"
 
-	appendChunkBytes       = 24_000
-	defaultEventBuffer     = 64
-	defaultMaxMessageBytes = 4 << 20
+	appendChunkBytes   = 24_000
+	defaultEventBuffer = 64
+	// defaultMaxMessageBytes matches protocol.MaxProviderEventBytes: a native
+	// event forwarded downstream may not exceed the ProviderEvent contract
+	// bound, so the socket refuses an upstream message larger than it.
+	defaultMaxMessageBytes = 2 << 20
 	defaultSetupTimeout    = 15 * time.Second
 )
 
@@ -36,12 +39,20 @@ type providerProfile struct {
 	host          string
 	path          string
 	extensionID   string
+	protocol      protocol.SpeechProtocol
 	hybridSession bool
+	// tokenMetered marks a provider that bills this socket in tokens, so the
+	// adapter emits the per-modality billing observations in billing.go.
+	// OpenAI does. xAI does NOT: Grok Voice is sold per connected audio minute
+	// plus a flat fee per text input, a completely different dimension set,
+	// and reporting token dimensions for it would offer settlement quantities
+	// its rate card cannot price.
+	tokenMetered bool
 }
 
 var profiles = map[string]providerProfile{
-	"openai": {adapterID: AdapterIDOpenAI, host: "api.openai.com", path: "/v1/realtime", extensionID: "openai.com/realtime/v1"},
-	"xai":    {adapterID: AdapterIDXAI, host: "api.x.ai", path: "/v1/realtime", extensionID: "x.ai/realtime/v1", hybridSession: true},
+	"openai": {adapterID: AdapterIDOpenAI, host: "api.openai.com", path: "/v1/realtime", extensionID: "openai.com/realtime/v1", protocol: protocol.SpeechProtocolOpenAIRealtimeV1, tokenMetered: true},
+	"xai":    {adapterID: AdapterIDXAI, host: "api.x.ai", path: "/v1/realtime", extensionID: "x.ai/realtime/v1", protocol: protocol.SpeechProtocolXAIRealtimeV1, hybridSession: true},
 }
 
 type Config struct {
@@ -53,6 +64,13 @@ type Config struct {
 	AllowedEndpointHosts  []string
 	AllowInsecureEndpoint bool
 	SetupTimeout          time.Duration
+	// NativeEvents surfaces EVERY vendor server event — audio deltas included
+	// — as protocol.EventProviderEvent envelopes and suppresses canonical
+	// audio frames, so a relay can forward the Realtime protocol verbatim.
+	// Off by default: the local gateway receives canonical audio frames, and
+	// every non-audio vendor event still rides a provider.event envelope
+	// beside its canonical translation.
+	NativeEvents bool
 }
 
 type Adapter struct {
@@ -65,6 +83,7 @@ type Adapter struct {
 	setupTimeout    time.Duration
 	hosts           map[string]struct{}
 	allowInsecure   bool
+	nativeEvents    bool
 }
 
 func New(config Config) (*Adapter, error) {
@@ -99,7 +118,7 @@ func New(config Config) (*Adapter, error) {
 		provider: config.Provider, profile: profile, id: config.AdapterID,
 		httpClient: config.HTTPClient, eventBuffer: config.EventBuffer,
 		maxMessageBytes: config.MaxMessageBytes, setupTimeout: config.SetupTimeout,
-		hosts: hosts, allowInsecure: config.AllowInsecureEndpoint,
+		hosts: hosts, allowInsecure: config.AllowInsecureEndpoint, nativeEvents: config.NativeEvents,
 	}, nil
 }
 
@@ -134,6 +153,16 @@ func (a *Adapter) Open(ctx context.Context, request runtimepkg.AdapterRequest) (
 	if request.Options.S2S == nil || request.Options.S2S.OutputMedia == nil {
 		return nil, fmt.Errorf("%s realtime requires output media configuration", a.provider)
 	}
+	// GPT-Live-only options (seeded history, delegation) are meaningless to the
+	// Realtime protocol; accepting and ignoring them would silently drop the
+	// caller's requested behavior, so refuse them here instead.
+	if request.Options.S2S.Live != nil {
+		return nil, &runtimepkg.ProviderError{
+			Code:    "invalid_request",
+			Message: fmt.Sprintf("%s realtime does not accept GPT-Live session options; select gpt-live-1 for history or delegation", a.provider),
+			Hint:    "Use the gpt-live-1 model (openai.live.v1) for seeded history or delegation.",
+		}
+	}
 	output := request.Options.S2S.OutputMedia
 	if err := validatePCM(a.provider, "output", *output); err != nil {
 		return nil, err
@@ -161,6 +190,7 @@ func (a *Adapter) Open(ctx context.Context, request runtimepkg.AdapterRequest) (
 	streamCtx, cancel := context.WithCancel(context.Background())
 	stream := &realtimeStream{
 		provider: a.provider, profile: a.profile, conn: conn, ctx: streamCtx, cancel: cancel,
+		nativeEvents: a.nativeEvents, model: model,
 		events: make(chan runtimepkg.ProviderEvent, a.eventBuffer), setupDone: make(chan error, 1),
 	}
 	if err := stream.writeJSON(ctx, buildSessionUpdate(a.profile, model, request.Media.SampleRateHz, output.SampleRateHz, request.Options)); err != nil {
@@ -257,13 +287,15 @@ func buildSessionUpdate(profile providerProfile, model string, inputHz, outputHz
 }
 
 type realtimeStream struct {
-	provider  string
-	profile   providerProfile
-	conn      *websocket.Conn
-	ctx       context.Context
-	cancel    context.CancelFunc
-	events    chan runtimepkg.ProviderEvent
-	setupDone chan error
+	provider     string
+	profile      providerProfile
+	model        string
+	nativeEvents bool
+	conn         *websocket.Conn
+	ctx          context.Context
+	cancel       context.CancelFunc
+	events       chan runtimepkg.ProviderEvent
+	setupDone    chan error
 
 	writeMu      sync.Mutex
 	gracefulOnce sync.Once
@@ -308,6 +340,66 @@ func (s *realtimeStream) CommitText(context.Context) error { return runtimepkg.E
 
 func (s *realtimeStream) Cancel(ctx context.Context) error {
 	return s.writeJSON(ctx, map[string]any{"type": "response.cancel"})
+}
+
+// SendProviderControl forwards one allowlisted native Realtime command. A
+// session.update may not move the model or either audio format: the model is
+// pinned by the signed plan and the formats by the admitted media.
+func (s *realtimeStream) SendProviderControl(ctx context.Context, control protocol.ProviderControl) error {
+	if err := control.Validate(s.profile.protocol); err != nil {
+		return fmt.Errorf("%w: %v", runtimepkg.ErrUnsupportedOperation, err)
+	}
+	if control.Type == "session.update" {
+		var update struct {
+			Session struct {
+				Model string `json:"model"`
+				Audio *struct {
+					Input *struct {
+						Format json.RawMessage `json:"format"`
+					} `json:"input"`
+					Output *struct {
+						Format json.RawMessage `json:"format"`
+					} `json:"output"`
+				} `json:"audio"`
+			} `json:"session"`
+		}
+		if json.Unmarshal(control.Payload, &update) != nil {
+			return fmt.Errorf("%w: session.update requires a session object", runtimepkg.ErrUnsupportedOperation)
+		}
+		if update.Session.Model != "" && update.Session.Model != s.model {
+			return fmt.Errorf("%w: session.update cannot change the model from %q", runtimepkg.ErrUnsupportedOperation, s.model)
+		}
+		if audio := update.Session.Audio; audio != nil && ((audio.Input != nil && len(audio.Input.Format) > 0) || (audio.Output != nil && len(audio.Output.Format) > 0)) {
+			return fmt.Errorf("%w: session.update cannot change the audio format after the session opened", runtimepkg.ErrUnsupportedOperation)
+		}
+	}
+	if s.closed.Load() {
+		return runtimepkg.ErrSessionClosed
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	if err := s.conn.Write(ctx, websocket.MessageText, control.Payload); err != nil {
+		if s.closed.Load() {
+			return runtimepkg.ErrSessionClosed
+		}
+		return &runtimepkg.ProviderError{Code: "provider_unavailable", Message: s.provider + " realtime socket write failed", Retryable: true, Cause: err}
+	}
+	return nil
+}
+
+// providerEvent surfaces one vendor event verbatim, optionally carrying the
+// billing observation that event established. The observation is internal
+// metering evidence and never reaches the customer's stream.
+func (s *realtimeStream) providerEvent(eventType string, raw []byte, observations ...*protocol.BillingObservation) {
+	var observation *protocol.BillingObservation
+	if len(observations) > 0 {
+		observation = observations[0]
+	}
+	envelope, err := json.Marshal(protocol.ProviderEvent{Type: eventType, Payload: append(json.RawMessage(nil), raw...)})
+	if err != nil {
+		return
+	}
+	s.emit(runtimepkg.ProviderEvent{Type: protocol.EventProviderEvent, Data: envelope, Billing: observation})
 }
 
 func (s *realtimeStream) Close(context.Context) error {
@@ -423,6 +515,24 @@ func (s *realtimeStream) readLoop() {
 
 func (s *realtimeStream) handle(event serverEvent, raw []byte) {
 	switch event.Type {
+	case "response.output_audio.delta", "response.audio.delta":
+		// Audio is either canonical frames or native envelopes, never both.
+		if s.nativeEvents {
+			s.providerEvent(event.Type, raw)
+			return
+		}
+	case "session.updated":
+		// Setup confirmation anchors the session's own billing operation: a
+		// session that never produces a response still has to settle as a
+		// measured zero rather than as missing evidence.
+		s.providerEvent(event.Type, raw, s.sessionBilling())
+	case "error":
+		// handleError decides whether the native envelope is a warning or
+		// the terminal failure; it forwards the raw event itself.
+	default:
+		s.providerEvent(event.Type, raw)
+	}
+	switch event.Type {
 	case "session.updated":
 		s.settleSetup(nil)
 	case "session.created":
@@ -454,8 +564,21 @@ func (s *realtimeStream) handle(event serverEvent, raw []byte) {
 			s.emit(runtimepkg.ProviderEvent{Type: protocol.EventTextDelta, Data: marshalData(map[string]string{"text": event.Delta})})
 		}
 	case "response.done":
-		if event.Response != nil && len(event.Response.Usage) > 0 {
-			s.emit(runtimepkg.ProviderEvent{Type: protocol.EventUsageObserved, Data: marshalData(map[string]string{"provider_request_id": event.Response.ID}), Extensions: s.extension(event.Response.Usage)})
+		if event.Response != nil {
+			// The usage document rides the extension as dispute evidence; the
+			// billing observation beside it is what settlement actually
+			// prices. Both are emitted even when the vendor sent no usage at
+			// all, because a response that completed without billing evidence
+			// has to leave the attempt unresolved rather than settle as free.
+			observed := runtimepkg.ProviderEvent{
+				Type:    protocol.EventUsageObserved,
+				Data:    marshalData(map[string]string{"provider_request_id": event.Response.ID}),
+				Billing: s.responseBilling(event),
+			}
+			if len(event.Response.Usage) > 0 {
+				observed.Extensions = s.extension(event.Response.Usage)
+			}
+			s.emit(observed)
 		}
 		if event.Response != nil && event.Response.Status == "cancelled" {
 			s.emit(runtimepkg.ProviderEvent{Type: protocol.EventResponseCanceled})
@@ -472,6 +595,7 @@ func (s *realtimeStream) handleError(event serverEvent, raw []byte) {
 	}
 	fatal := !s.ready.Load() || kind == "server_error" || code == "session_expired" || code == "invalid_api_key" || code == "insufficient_quota" || code == "rate_limit_exceeded"
 	if !fatal {
+		s.providerEvent(event.Type, raw)
 		s.emit(runtimepkg.ProviderEvent{Type: protocol.EventWarning, Extensions: s.extension(raw)})
 		return
 	}

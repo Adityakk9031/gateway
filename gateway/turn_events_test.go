@@ -144,6 +144,7 @@ func TestTurnEventsValidationRejectsWholeBatch(t *testing.T) {
 		{"zero tool index", turnEventPayload("tool.started", "turn_000001", 1, map[string]any{"mono_ms": 1, "tool_index": 0})},
 		{"non-boolean ok", turnEventPayload("llm.completed", "turn_000001", 1, map[string]any{"mono_ms": 1, "ok": "yes"})},
 		{"llm leg with session id", turnEventPayload("leg.attached", "turn_000001", 1, map[string]any{"mono_ms": 1, "kind": "llm", "request_id": "req-1", "session_id": "sess-1"})},
+		{"evaluation leg with attempt id", turnEventPayload("leg.attached", "turn_000001", 1, map[string]any{"mono_ms": 1, "kind": "evaluation", "request_id": "req-1", "attempt_id": "att-1"})},
 		{"stt leg missing attempt id", turnEventPayload("leg.attached", "turn_000001", 1, map[string]any{"mono_ms": 1, "kind": "stt", "session_id": "sess-1"})},
 		{"leg with oversized identifier", turnEventPayload("leg.attached", "turn_000001", 1, map[string]any{"mono_ms": 1, "kind": "llm", "request_id": strings.Repeat("r", 257)})},
 	}
@@ -208,10 +209,11 @@ func TestTurnEventsMapToTelemetryEvents(t *testing.T) {
 		turnEventPayload("user.speech.ended", "turn_000001", 3, map[string]any{"mono_ms": 812}),
 		turnEventPayload("leg.attached", "turn_000001", 4, map[string]any{"mono_ms": 813, "kind": "stt", "session_id": "sess-1", "attempt_id": "att-1", "provider": "deepgram"}),
 		turnEventPayload("leg.attached", "turn_000001", 5, map[string]any{"mono_ms": 814, "kind": "llm", "request_id": "req-9"}),
-		turnEventPayload("llm.completed", "turn_000001", 6, map[string]any{"mono_ms": 1200, "ok": true}),
-		turnEventPayload("playback.stopped", "turn_000001", 7, map[string]any{"mono_ms": 2400, "interrupted": false, "playback_position_ms": 1500}),
-		turnEventPayload("turn.completed", "turn_000001", 8, map[string]any{"mono_ms": 2401}),
-		turnEventPayload("conversation.ended", "", 9, map[string]any{"mono_ms": 2500, "reason": "hangup", "turn_count": 1}),
+		turnEventPayload("leg.attached", "turn_000001", 6, map[string]any{"mono_ms": 815, "kind": "evaluation", "request_id": "req-eval-1", "provider": "typesafe"}),
+		turnEventPayload("llm.completed", "turn_000001", 7, map[string]any{"mono_ms": 1200, "ok": true}),
+		turnEventPayload("playback.stopped", "turn_000001", 8, map[string]any{"mono_ms": 2400, "interrupted": false, "playback_position_ms": 1500}),
+		turnEventPayload("turn.completed", "turn_000001", 9, map[string]any{"mono_ms": 2401}),
+		turnEventPayload("conversation.ended", "", 10, map[string]any{"mono_ms": 2500, "reason": "hangup", "turn_count": 1}),
 	}
 	response := postTurnEvents(t, httpServer.URL, "local-token", events)
 	if response.StatusCode != http.StatusAccepted {

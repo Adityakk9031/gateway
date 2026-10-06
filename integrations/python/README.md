@@ -1,9 +1,10 @@
 # Speko Gateway Python integration
 
 This package connects Python voice-agent frameworks to the authenticated local
-Speko Gateway socket, and optionally to the hosted Speko Router for LLM. The
+Speko Gateway socket, and optionally to the hosted Speko Router for LLM and
+typed evaluation. The
 voice classes read no Speko API key or provider credentials; only the relay
-`LLM` class authenticates with `SPEKO_API_KEY`.
+hosted clients authenticate with `SPEKO_API_KEY`.
 
 For LiveKit Agents:
 
@@ -62,6 +63,32 @@ session = AgentSession(
 provider-direct voice legs, the conversation history travels through the
 Speko Router. Function tools are supported; image and audio content is
 silently skipped — only text is forwarded.
+
+Jev evaluations use the separate pooled async client and require an explicit
+idempotency key:
+
+```python
+from speko_gateway import RelayEvaluationClient
+
+client = RelayEvaluationClient.from_env(session_id="conversation-42")
+result = await client.evaluate(
+    state={"transcript": "Can I speak to someone?"},
+    questions={
+        "handoff": {
+            "type": "noul",
+            "instructions": "Is a human explicitly requested?",
+        }
+    },
+    idempotency_key="conversation-42-turn-7",
+)
+await client.aclose()
+```
+
+Run `python examples/jev_voice_router.py --fake` for the framework-independent
+final-transcript example. It batches Choice, Noul, and Score, applies a 500 ms
+application deadline, cancels superseded turns, and dispatches only allowlisted
+read-only handlers. Its confidence thresholds are example defaults that must be
+evaluated on your own traffic.
 
 For Pipecat 1.7+:
 

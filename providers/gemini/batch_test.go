@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"github.com/SpekoAI/gateway/internal/batchhttp"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -156,7 +157,7 @@ func TestBatchDiarizationRequestsVerbatimModeAndBuildsSegments(t *testing.T) {
 	request := batchRequest(server.URL, []byte("wav"))
 	diarize := true
 	request.Options.Language = "en-US"
-	request.Options.STT = &protocol.SttOptions{Diarization: &diarize, Keywords: []string{"Speko", "   "}}
+	request.Options.STT = &protocol.SttOptions{Diarization: &diarize}
 
 	result, err := newBatchAdapter(t, server).Transcribe(context.Background(), request)
 	if err != nil {
@@ -167,8 +168,8 @@ func TestBatchDiarizationRequestsVerbatimModeAndBuildsSegments(t *testing.T) {
 	if languages, _ := config["language_codes"].([]any); len(languages) != 1 || languages[0] != "en-US" {
 		t.Fatalf("language_codes = %v", config["language_codes"])
 	}
-	if vocabulary, _ := config["custom_vocabulary"].([]any); len(vocabulary) != 1 || vocabulary[0] != "Speko" {
-		t.Fatalf("custom_vocabulary = %v, want blank keywords dropped", config["custom_vocabulary"])
+	if _, present := config["custom_vocabulary"]; present {
+		t.Fatalf("custom_vocabulary = %v, want none when no keywords were asked", config["custom_vocabulary"])
 	}
 	mode, _ := config["mode"].(map[string]any)
 	if mode["type"] != "verbatim" || mode["diarization_mode"] != "speaker" {
@@ -194,7 +195,83 @@ func TestBatchDiarizationRequestsVerbatimModeAndBuildsSegments(t *testing.T) {
 	if result.Segments[1].Text != "friend" || result.Segments[1].Speaker != "spk_2" || result.Segments[1].StartMS != 1100 {
 		t.Fatalf("second segment = %+v", result.Segments[1])
 	}
+	// Diarization alone exposes segments, not the per-word list.
+	if len(result.Words) != 0 {
+		t.Fatalf("Words = %+v, want none without a word_timestamps ask", result.Words)
+	}
 }
+
+func TestBatchWordTimestampsRequestVerbatimModeAndReturnWords(t *testing.T) {
+	t.Parallel()
+	// Shape observed live on 2026-09-05: offsets are Duration strings, some
+	// without a fractional part ("1s"), and speaker is absent without
+	// diarization.
+	const response = `{"id":"i2","steps":[{"type":"model_output","content":[{"type":"text","text":"salom dunyo","annotations":[
+		{"type":"word_info","text":"salom","start_offset":"0.120s","end_offset":"0.480s","start_index":0,"end_index":5},
+		{"type":"word_info","text":"dunyo","start_offset":"0.510s","end_offset":"1s","start_index":6,"end_index":11}
+	]}]}]}`
+	server, captured := newFakeInteractions(t, http.StatusOK, response)
+	request := batchRequest(server.URL, []byte("wav"))
+	words := true
+	request.Options.Language = "uz-UZ"
+	request.Options.STT = &protocol.SttOptions{WordTimestamps: &words}
+
+	result, err := newBatchAdapter(t, server).Transcribe(context.Background(), request)
+	if err != nil {
+		t.Fatalf("Transcribe: %v", err)
+	}
+	generation, _ := captured.body["generation_config"].(map[string]any)
+	config, _ := generation["transcription_config"].(map[string]any)
+	mode, _ := config["mode"].(map[string]any)
+	if mode["type"] != "verbatim" {
+		t.Fatalf("mode = %v, want the verbatim mode object", config["mode"])
+	}
+	if _, present := mode["diarization_mode"]; present {
+		t.Fatalf("diarization_mode was sent without a diarization ask: %v", mode)
+	}
+	if granularities, _ := mode["timestamp_granularities"].([]any); len(granularities) != 1 || granularities[0] != "word" {
+		t.Fatalf("timestamp_granularities = %v", mode["timestamp_granularities"])
+	}
+	if result.Text != "salom dunyo" {
+		t.Fatalf("Text = %q", result.Text)
+	}
+	want := []runtimepkg.BatchWord{{Text: "salom", StartMS: 120, EndMS: 480}, {Text: "dunyo", StartMS: 510, EndMS: 1000}}
+	if len(result.Words) != len(want) || result.Words[0] != want[0] || result.Words[1] != want[1] {
+		t.Fatalf("Words = %+v, want %+v", result.Words, want)
+	}
+	// Segments are still grouped from the same annotations.
+	if len(result.Segments) != 1 || result.Segments[0].Text != "salom dunyo" || result.Segments[0].EndMS != 1000 {
+		t.Fatalf("Segments = %+v", result.Segments)
+	}
+}
+
+// Google answers custom_vocabulary + timestamps with HTTP 400. The adapter
+// refuses the combination itself, naming it, instead of sending the request
+// or quietly dropping one ask.
+func TestBatchRefusesKeywordsWithVerbatimModeAsks(t *testing.T) {
+	t.Parallel()
+	server, captured := newFakeInteractions(t, http.StatusOK, `{"id":"i3","output_text":"never"}`)
+	for name, options := range map[string]*protocol.SttOptions{
+		"diarization":     {Diarization: boolPointer(true), Keywords: []string{"Speko"}},
+		"word timestamps": {WordTimestamps: boolPointer(true), Keywords: []string{"Speko"}},
+	} {
+		request := batchRequest(server.URL, []byte("wav"))
+		request.Options.STT = options
+		_, err := newBatchAdapter(t, server).Transcribe(context.Background(), request)
+		var providerErr *runtimepkg.ProviderError
+		if !errors.As(err, &providerErr) || providerErr.Code != "invalid_request" {
+			t.Fatalf("%s: err = %v, want an invalid_request provider error", name, err)
+		}
+		if !strings.Contains(providerErr.Message, "keywords") {
+			t.Fatalf("%s: message %q must name the conflicting ask", name, providerErr.Message)
+		}
+	}
+	if captured.body != nil {
+		t.Fatalf("a refused combination must not reach the service, sent %v", captured.body)
+	}
+}
+
+func boolPointer(value bool) *bool { return &value }
 
 // An offset the service omits or spells unexpectedly degrades the segment's
 // timing rather than failing the transcription.
@@ -250,13 +327,67 @@ func TestBatchClassifiesUpstreamFailure(t *testing.T) {
 	}
 }
 
-// An empty transcript is a failure, not an empty success: it would settle as a
-// billed request that produced nothing the caller can use.
-func TestBatchRefusesEmptyTranscript(t *testing.T) {
+// An empty transcript is an empty success, not a failure: silent audio
+// legitimately transcribes to nothing, and the caller is metered for the audio
+// it sent regardless. The other batch adapters surface it as text "".
+//
+// The first case is the shape the service actually returns for speech-free
+// audio, captured 2026-09-09 from v1beta/interactions for 30 s of digital
+// silence and for a 440 Hz tone: status "completed", an audio-only usage block
+// with zero output tokens, and NO steps key at all. Before this pin the
+// decoder demanded a model_output step and turned every silent, musical or
+// wrong-language chunk into a retryable 502 the caller could never retry past.
+func TestBatchReturnsAnEmptyTranscriptForSilence(t *testing.T) {
 	t.Parallel()
-	server, _ := newFakeInteractions(t, http.StatusOK, `{"id":"i1","steps":[{"type":"model_output","content":[{"type":"text","text":"   "}]}]}`)
-	if _, err := newBatchAdapter(t, server).Transcribe(context.Background(), batchRequest(server.URL, []byte("wav"))); err == nil {
-		t.Fatal("accepted a response with no transcript")
+	cases := map[string]string{
+		"completed interaction without steps":           `{"id":"i1","status":"completed","usage":{"total_tokens":751,"total_input_tokens":751,"input_tokens_by_modality":[{"modality":"audio","tokens":750}],"total_output_tokens":0},"object":"interaction","model":"gemini-3.5-transcribe"}`,
+		"completed interaction echoing only user_input": `{"id":"i1","status":"completed","steps":[{"type":"user_input","content":[{"type":"audio"}]}]}`,
+		"model_output with whitespace-only text":        `{"id":"i1","status":"completed","steps":[{"type":"model_output","content":[{"type":"text","text":"   "}]}]}`,
+	}
+	for name, response := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			server, _ := newFakeInteractions(t, http.StatusOK, response)
+			request := batchRequest(server.URL, []byte("wav"))
+			// Word timings are the ask that sends real callers down this path;
+			// an empty transcript must carry none rather than fail the ask.
+			request.Options.STT = &protocol.SttOptions{WordTimestamps: boolPointer(true)}
+			result, err := newBatchAdapter(t, server).Transcribe(context.Background(), request)
+			if err != nil {
+				t.Fatalf("Transcribe: %v", err)
+			}
+			if result.Text != "" || len(result.Segments) != 0 || len(result.Words) != 0 || result.ProviderRequestID != "i1" {
+				t.Fatalf("result = %+v, want an empty transcript with the interaction id preserved", result)
+			}
+		})
+	}
+}
+
+// A decodable 200 that shows no evidence the model produced output is a
+// response shape the adapter does not understand, not silence, and must not
+// settle as an empty success: neither a body with no status and no steps, nor
+// a completed interaction whose only step is of a kind this decoder does not
+// read (a refusal, an error step, a future shape). The refusal names the
+// status it saw so the next such shape is diagnosable.
+func TestBatchRefusesAStructurallyIncompleteResponse(t *testing.T) {
+	t.Parallel()
+	cases := map[string]struct{ response, status string }{
+		"no status and no steps":                   {`{"id":"i1"}`, `status ""`},
+		"completed with only an unknown step kind": {`{"id":"i1","status":"completed","steps":[{"type":"refusal","content":[{"type":"text","text":"blocked"}]}]}`, `status "completed"`},
+	}
+	for name, testCase := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			server, _ := newFakeInteractions(t, http.StatusOK, testCase.response)
+			_, err := newBatchAdapter(t, server).Transcribe(context.Background(), batchRequest(server.URL, []byte("wav")))
+			var providerErr *runtimepkg.ProviderError
+			if !errors.As(err, &providerErr) || providerErr.Code != batchhttp.CodeProviderError || !providerErr.Retryable {
+				t.Fatalf("err = %v, want a retryable provider error for the incomplete response", err)
+			}
+			if providerErr.Cause == nil || !strings.Contains(providerErr.Cause.Error(), testCase.status) {
+				t.Fatalf("cause = %v, want %s named", providerErr.Cause, testCase.status)
+			}
+		})
 	}
 }
 

@@ -137,6 +137,14 @@ type AbortingProviderStream interface {
 	Abort(context.Context) error
 }
 
+// ProviderControlStream is an optional capability of speech-to-speech
+// streams: forwarding one bounded, protocol-allowlisted native provider
+// command (protocol.ProviderControl) upstream. Streams without it refuse
+// controls with ErrUnsupportedOperation.
+type ProviderControlStream interface {
+	SendProviderControl(context.Context, protocol.ProviderControl) error
+}
+
 // TerminalErrorProviderStream preserves a terminal failure independently of
 // the bounded event queue. Runtimes check it when Events closes so downstream
 // backpressure cannot turn a dropped terminal event into clean completion.
@@ -149,6 +157,9 @@ type TerminalErrorProviderStream interface {
 // event; it must not mutate any of them after delivery. Err terminates the
 // attempt and is never emitted as a normal event.
 type ProviderEvent struct {
+	// Billing is trusted normalized usage, independent of public event forwarding.
+	Billing *protocol.BillingObservation `json:"-"`
+
 	Type       protocol.EventType
 	Data       json.RawMessage
 	Extensions map[string]json.RawMessage

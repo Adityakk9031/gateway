@@ -1,5 +1,5 @@
-# json-mirror: openapi.json sha256:890238de6e30e3826cd8e0c00d26156d5ec7a17ec68bf3c3b0d45b95d18856e4
-# yaml-body: sha256:13516d2665963c08337d23bc4d23e715b9c69b05ecb2190d0d00e50959b71a37
+# json-mirror: openapi.json sha256:885830f7bba1fb0ff79d34304c95e009d70e1a0742489d534aa44f7914b5d3e0
+# yaml-body: sha256:73f2ee013d81911c291fde1bb14751841ae28a1ee4a04065bc69df232a05fe6f
 #
 # This YAML document is the hand-authored, human-readable source of the HTTP
 # contract. openapi.json is its checked-in JSON mirror: the same document,
@@ -19,18 +19,21 @@ info:
   title: Speko Router API
   version: "1.0.0"
   description: >-
-    HTTP contract of the Speko Router: model discovery, batch speech
-    transcription, one-shot speech synthesis, and LLM responses over JSON or
-    server-sent events. The Go types in package relayapi are the source of
-    truth for every shape in this document, and speccheck_test.go
-    machine-checks the two against each other. Streaming speech travels over
-    WebSocket and is specified separately in asyncapi.yaml. The /v1 prefix is
-    the stable major version: compatible fields and capabilities may be added,
-    while breaking changes require a new major path. Before a v1 operation or
-    field is retired, Speko documents a migration, sends the Deprecation header
-    and a Link with rel="deprecation", and provides at least 90 days of notice
-    before the Sunset date. See the public versioning policy for the complete
-    compatibility contract.
+    The Speko Router is streaming-first: live speech-to-text and
+    text-to-speech sessions, and the three native speech-to-speech routes,
+    all run over WebSocket and are specified in asyncapi.yaml, which this
+    Router serves at /asyncapi.json. This document is the HTTP contract, the
+    request/response surface beside those sockets: model discovery, batch
+    speech transcription, one-shot speech synthesis, LLM responses over JSON
+    or server-sent events, and Jev evaluations. The Go types in package
+    relayapi are the source of truth for every shape in this document, and
+    speccheck_test.go machine-checks the two against each other. The /v1
+    prefix is the stable major version: compatible fields and capabilities
+    may be added, while breaking changes require a new major path. Before a
+    v1 operation or field is retired, Speko documents a migration, sends the
+    Deprecation header and a Link with rel="deprecation", and provides at
+    least 90 days of notice before the Sunset date. See the public
+    versioning policy for the complete compatibility contract.
   x-speko-versioning-policy: https://speko.ai/developers/versioning
 externalDocs:
   description: Router API lifecycle and deprecation policy
@@ -53,8 +56,8 @@ paths:
         Returns this exact OpenAPI 3.1 document without authentication. Agents
         and code generators can use it to discover every HTTP operation,
         request shape, response shape, error code, and lifecycle convention.
-        Streaming speech operations are described by the AsyncAPI document in
-        the public Gateway repository.
+        Streaming speech operations are described by the AsyncAPI document,
+        which this Router serves at /asyncapi.json.
       security: []
       responses:
         "200":
@@ -72,6 +75,33 @@ paths:
           $ref: "#/components/responses/TooManyRequests"
         default:
           $ref: "#/components/responses/Error"
+  /asyncapi.json:
+    get:
+      operationId: getAsyncAPISpec
+      summary: Download the canonical Router streaming contract
+      description: >-
+        Returns the canonical AsyncAPI 2.6 document without authentication.
+        It specifies every WebSocket operation the Router serves: the
+        streaming speech-to-text and text-to-speech sessions, and the three
+        native speech-to-speech routes. This OpenAPI document describes the
+        HTTP operations.
+      security: []
+      responses:
+        "200":
+          description: The canonical AsyncAPI 2.6 document.
+          headers:
+            RateLimit-Policy:
+              $ref: "#/components/headers/RateLimitPolicy"
+          content:
+            application/json:
+              schema:
+                type: object
+                description: An AsyncAPI 2.6 document.
+                additionalProperties: true
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        default:
+          $ref: "#/components/responses/Error"
   /v1/models:
     get:
       operationId: listModels
@@ -84,8 +114,9 @@ paths:
         release-pinned catalog that produced the listing so support can
         correlate a caller's view with an exact release. The listing is
         advisory: admission remains the enforcement point for access gates
-        and credit. Optional language, objective, and path parameters select
-        the exact benchmark projection used to order and annotate the rows.
+        and credit. By default the response includes every public model. The
+        optional language, objective, and path parameters select the exact
+        benchmark projection used to order and annotate the rows.
       parameters:
         - name: language
           in: query
@@ -101,10 +132,18 @@ paths:
             enum: [quality, balanced, latency, cost]
         - name: path
           in: query
-          description: Speech transport projection; streaming is an alias for stream.
+          description: >-
+            Catalog projection. Defaults to all; streaming is an alias for
+            stream. Stream includes only models whose capabilities.streaming
+            is true. Batch preserves the prerecorded STT projection.
           schema:
             type: string
-            enum: [stream, streaming, batch]
+            enum: [all, stream, streaming, batch]
+        - name: kind
+          in: query
+          description: Optional capability category filter.
+          schema:
+            $ref: "#/components/schemas/Kind"
       responses:
         "200":
           description: The caller's slice of the catalog.
@@ -128,8 +167,11 @@ paths:
       operationId: createTranscription
       summary: Transcribe one uploaded audio file
       description: >-
-        Batch speech-to-text. The audio always travels as an uploaded part,
-        never as a URL: the Router fetches nothing on a caller's behalf. For
+        For live audio, open the streaming socket at /v1/stt/stream,
+        specified in asyncapi.yaml. This operation is the batch path, for a
+        recording that already exists. The audio always travels as an
+        uploaded part, never as a URL: the Router fetches nothing on a
+        caller's behalf. For
         idempotency the content hash covers the decoded part payload bytes
         only — no part headers, no boundary bytes — concatenated in part
         order (request, then audio), so a retry hashes identically no matter
@@ -193,7 +235,10 @@ paths:
       operationId: createSpeech
       summary: Synthesize one utterance to a raw audio stream
       description: >-
-        One-shot text-to-speech. The response body is a raw audio stream in
+        For speech that starts playing before the text is finished, open the
+        streaming socket at /v1/tts/stream, specified in asyncapi.yaml. This
+        operation is the one-shot path, synthesizing a single utterance in
+        full. The response body is a raw audio stream in
         the requested output format; the route and the billed character count
         come back in headers (Speko-Provider, Speko-Model, Speko-Region,
         Speko-Usage-Characters) because a byte stream has no place for a JSON
@@ -301,6 +346,47 @@ paths:
                   success or error on failure — never both and never zero, so
                   a client that sees the connection close without a terminal
                   event knows the stream was truncated rather than finished.
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/evaluations:
+    post:
+      operationId: createEvaluation
+      summary: Evaluate typed questions against shared state with Jev
+      description: >-
+        Executes one non-streaming TypeSafe Jev evaluation. Routing must be
+        explicit. The Router preserves native question ids, option keys,
+        probabilities, confidence, Score legends, and reported usage. The
+        application owns every decision and subsequent action.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EvaluationRequest"
+      responses:
+        "200":
+          description: The validated Jev evaluation result.
+          headers:
+            Speko-Request-ID:
+              $ref: "#/components/headers/SpekoRequestID"
+            Speko-Attempt-ID:
+              $ref: "#/components/headers/SpekoAttemptID"
+            Speko-Provider:
+              $ref: "#/components/headers/SpekoProvider"
+            Speko-Model:
+              $ref: "#/components/headers/SpekoModel"
+            Speko-Region:
+              $ref: "#/components/headers/SpekoRegion"
+            RateLimit-Policy:
+              $ref: "#/components/headers/RateLimitPolicy"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EvaluationResponse"
         "429":
           $ref: "#/components/responses/TooManyRequests"
         default:
@@ -625,23 +711,43 @@ components:
         cached_input_tokens:
           type: integer
           minimum: 0
+        cache_write_5m_tokens:
+          type: integer
+          minimum: 0
+          description: Disjoint cache-write input tokens for 5-minute retention.
+        cache_write_1h_tokens:
+          type: integer
+          minimum: 0
+          description: Disjoint cache-write input tokens for 1-hour retention.
+        incomplete:
+          type: boolean
+          description: Terminal billing quantities are missing or inconsistent; do not interpret missing evidence as zero usage.
         output_tokens:
           type: integer
           minimum: 0
         reasoning_tokens:
           type: integer
           minimum: 0
+        tool_calls:
+          type: integer
+          minimum: 0
+          description: >-
+            Billable hosted tool invocations (web search) performed by a
+            delegated GPT-Live backend; omitted for every other route.
       additionalProperties: false
     Kind:
       type: string
       description: >-
-        The provider-neutral operation served by the Router. The set is
-        deliberately smaller than the local gateway's session kinds: the Router
-        serves stt, tts, and llm, and has no realtime kind.
+        The provider-neutral operation served by the Router: stt, tts, llm,
+        and s2s. Speech-to-speech models are served on protocol-specific
+        WebSocket routes (Model.endpoint) that speak the vendor's native event
+        protocol (Model.protocol), documented in asyncapi.yaml.
       enum:
         - stt
         - tts
         - llm
+        - s2s
+        - evaluation
     ModelCapabilities:
       type: object
       description: >-
@@ -657,6 +763,14 @@ components:
         those asks fail closed; per-provider settings are deliberately not
         advertised here, being vendor-specific rather than portable.
       properties:
+        streaming:
+          type: boolean
+          description: >-
+            Supports the kind's public streaming operation: live audio
+            processing on /v1/stt/stream, incremental text/audio sessions on
+            /v1/tts/stream, streamed output on /v1/llm/responses, or
+            bidirectional realtime audio on the S2S endpoint. A one-shot HTTP
+            response whose body happens to be chunked does not make this true.
         tools:
           type: boolean
         structured_output:
@@ -665,6 +779,13 @@ components:
           type: boolean
         reasoning:
           type: boolean
+        evaluation_question_types:
+          type: array
+          description: Supported typed evaluation primitives; evaluation models only.
+          items:
+            type: string
+            enum: [choice, score, noul]
+          uniqueItems: true
         diarization:
           type: boolean
           description: >-
@@ -677,6 +798,12 @@ components:
         noise_reduction:
           type: boolean
           description: Accepts an audio-enhancement ask.
+        word_timestamps:
+          type: boolean
+          description: >-
+            Accepts a word_timestamps ask on POST /v1/stt/transcriptions and
+            returns per-word timings as `words`. Batch only. Distinct from
+            word_timings, which describes what a TTS route emits unasked.
         word_timings:
           type: boolean
           description: >-
@@ -691,7 +818,15 @@ components:
             Router emits what the engine measured and never groups
             characters into words, because only the caller knows where the
             words are in the text it sent.
+        translation:
+          type: boolean
+          description: >-
+            The model translates: speech in, speech in another language out
+            (kind s2s), or speech in, translated text out (kind stt). A
+            translation model is not conversational: its session carries a
+            target language and produces no assistant turn.
       required:
+        - streaming
         - tools
         - structured_output
         - cached_input
@@ -699,8 +834,10 @@ components:
         - diarization
         - keywords
         - noise_reduction
+        - word_timestamps
         - word_timings
         - character_timings
+        - translation
       additionalProperties: false
     Model:
       type: object
@@ -723,11 +860,39 @@ components:
             type: string
         audio_formats:
           type: array
-          description: Accepted input formats for STT or output formats for TTS; omitted for LLM models.
+          description: >-
+            Accepted input formats for STT and S2S models, or output formats
+            for TTS models; omitted for LLM models.
+          items:
+            $ref: "#/components/schemas/AudioFormat"
+        output_audio_formats:
+          type: array
+          description: >-
+            The formats an S2S model speaks in; omitted for every other kind.
           items:
             $ref: "#/components/schemas/AudioFormat"
         batch_audio_limits:
           $ref: "#/components/schemas/BatchAudioLimits"
+        endpoint:
+          type: string
+          enum: [/v1/realtime, /v1/live, /v1/bidi, /v1/realtime/translations, /v1/realtime/translations/qwen]
+          description: >-
+            The public Router WebSocket route an S2S model is served on;
+            omitted for every other kind, whose routes are fixed per kind.
+            Select the model exactly: /v1/realtime, /v1/realtime/translations
+            and /v1/realtime/translations/qwen take it as the `model` query
+            parameter, /v1/live in the first session.start frame,
+            /v1/bidi in the first setup frame. A model sent to another route
+            is refused with capability_unsupported.
+        protocol:
+          type: string
+          enum: [openai.realtime.v1, xai.realtime.v1, openai.live.v1, google.live.v1, openai.realtime.translation.v1, alibaba.livetranslate.v1]
+          description: >-
+            The native event protocol the S2S route speaks; omitted for every
+            other kind. It also tells a client how to frame its messages: the
+            OpenAI, xAI, GPT-Live, OpenAI translation and Alibaba LiveTranslate
+            protocols tag every message by "type"; google.live.v1 uses its
+            single top-level key.
         benchmark:
           $ref: "#/components/schemas/ModelBenchmark"
       required:
@@ -824,7 +989,7 @@ components:
           enum: [quality, balanced, latency, cost]
         path:
           type: string
-          enum: [stream, batch]
+          enum: [all, stream, batch]
       required:
         - schema
         - source
@@ -921,14 +1086,38 @@ components:
             Transcription feature asks and per-provider settings. Omit for
             plain text.
       additionalProperties: false
+    STTTranslation:
+      type: object
+      description: >-
+        Translate the spoken audio into target_language and return the
+        translated words BESIDE the transcript: text stays the original
+        words and the translation rides a separate translation field, so
+        a caller that never asks reads exactly what it read before. Fails
+        closed like the other canonical asks: a route whose model does
+        not advertise capabilities.translation is refused
+        capability_unsupported naming translation. One way only; the
+        source is whatever is spoken.
+      properties:
+        target_language:
+          type: string
+          description: >-
+            A BCP-47 language tag such as "es" or "pt-BR": a 2-3 letter
+            primary subtag, then 1-8 character alphanumeric subtags, at
+            most 35 characters. A shape check only; a language the
+            routed vendor does not translate into is the vendor's error.
+          minLength: 2
+          maxLength: 35
+      required:
+        - target_language
+      additionalProperties: false
     STTOptions:
       type: object
       description: >-
         What a caller asked a transcription to do beyond returning text. The
         same object rides POST /v1/stt/transcriptions and the STT
         session.configure frame, in the same vocabulary the local gateway
-        uses. The canonical asks (diarization, keywords, noise_reduction)
-        fail closed: a request whose routed model does not advertise the
+        uses. The canonical asks (diarization, keywords, noise_reduction,
+        word_timestamps, translation) fail closed: a request whose routed model does not advertise the
         matching capability in GET /v1/models is rejected with
         capability_unsupported, never answered 200 with the feature quietly
         missing. Names arrive lower case and are rejected otherwise rather
@@ -953,6 +1142,15 @@ components:
         noise_reduction:
           type: boolean
           description: Ask the provider to clean the audio before transcribing.
+        word_timestamps:
+          type: boolean
+          description: >-
+            Return per-word start/end timings as `words` on the batch
+            transcription result. Batch only: no streaming route advertises
+            it. Omitted leaves the result without words, which is not the same
+            as false.
+        translation:
+          $ref: "#/components/schemas/STTTranslation"
         provider_options:
           type: object
           description: >-
@@ -972,6 +1170,30 @@ components:
                 - type: boolean
                 - type: number
                 - type: string
+      additionalProperties: false
+    TranscriptWord:
+      type: object
+      description: >-
+        One word of the transcript with its own timing, present only when the
+        request asked for word_timestamps. speaker follows the same rule as on
+        TranscriptSegment: the vendor's own label, only when diarization was
+        also asked for.
+      properties:
+        text:
+          type: string
+        start_ms:
+          type: integer
+          minimum: 0
+        end_ms:
+          type: integer
+          minimum: 0
+          description: Must not precede start_ms.
+        speaker:
+          type: string
+      required:
+        - text
+        - start_ms
+        - end_ms
       additionalProperties: false
     TranscriptSegment:
       type: object
@@ -1013,6 +1235,20 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/TranscriptSegment"
+        words:
+          type: array
+          description: >-
+            Per-word timings, present only when the request asked for
+            word_timestamps and the routed model advertises it.
+          items:
+            $ref: "#/components/schemas/TranscriptWord"
+        translation:
+          type: string
+          description: >-
+            The transcript translated into options.translation.target_language,
+            present only when translation was asked for. text stays the
+            original spoken words. Translated words carry no timings, so there
+            are no translated segments.
         route:
           $ref: "#/components/schemas/Route"
         usage:
@@ -1425,6 +1661,192 @@ components:
       required:
         - input
         - max_output_tokens
+      additionalProperties: false
+    EvaluationRequest:
+      type: object
+      description: A TypeSafe-native state and typed question batch with an explicit Speko route.
+      properties:
+        routing:
+          $ref: "#/components/schemas/EvaluationRouting"
+        state:
+          oneOf:
+            - type: string
+            - type: object
+              additionalProperties: true
+            - type: array
+              items: {}
+        questions:
+          type: object
+          minProperties: 1
+          additionalProperties:
+            $ref: "#/components/schemas/EvaluationQuestion"
+      required: [routing, state, questions]
+      additionalProperties: false
+    EvaluationRouting:
+      type: object
+      properties:
+        mode:
+          type: string
+          enum: [explicit]
+        provider:
+          type: string
+          minLength: 1
+        model:
+          type: string
+          minLength: 1
+      required: [mode, provider, model]
+      additionalProperties: false
+    EvaluationQuestion:
+      description: >-
+        A noul, choice, or score question. Instructions may be structured JSON.
+        Choice criteria contain 2-255 keyed options; Score criteria contain
+        2-10 ordered levels; Noul criteria may describe true and/or false.
+      oneOf:
+        - $ref: "#/components/schemas/NoulQuestion"
+        - $ref: "#/components/schemas/ChoiceQuestion"
+        - $ref: "#/components/schemas/ScoreQuestion"
+    EvaluationJSONStructure:
+      oneOf:
+        - type: string
+        - type: object
+          additionalProperties: true
+        - type: array
+          items: {}
+    NoulQuestion:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [noul]
+        instructions:
+          $ref: "#/components/schemas/EvaluationJSONStructure"
+        criteria:
+          type: object
+          minProperties: 1
+          properties:
+            "true":
+              oneOf:
+                - type: "null"
+                - $ref: "#/components/schemas/EvaluationJSONStructure"
+            "false":
+              oneOf:
+                - type: "null"
+                - $ref: "#/components/schemas/EvaluationJSONStructure"
+          additionalProperties: false
+      required: [type, instructions]
+      additionalProperties: false
+    ChoiceQuestion:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [choice]
+        instructions:
+          $ref: "#/components/schemas/EvaluationJSONStructure"
+        criteria:
+          type: object
+          minProperties: 2
+          maxProperties: 255
+          additionalProperties:
+            oneOf:
+              - type: "null"
+              - $ref: "#/components/schemas/EvaluationJSONStructure"
+      required: [type, instructions, criteria]
+      additionalProperties: false
+    ScoreQuestion:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [score]
+        instructions:
+          $ref: "#/components/schemas/EvaluationJSONStructure"
+        criteria:
+          type: array
+          minItems: 2
+          maxItems: 10
+          items:
+            $ref: "#/components/schemas/EvaluationJSONStructure"
+      required: [type, instructions, criteria]
+      additionalProperties: false
+    EvaluationAnswer:
+      description: >-
+        One native Jev answer. Noul is a numeric yes probability. Choice and
+        Score confidence is a separate distribution statistic and must not be
+        multiplied into the selected answer probability.
+      oneOf:
+        - $ref: "#/components/schemas/NoulAnswer"
+        - $ref: "#/components/schemas/ChoiceAnswer"
+        - $ref: "#/components/schemas/ScoreAnswer"
+    NoulAnswer:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [noul]
+        noul:
+          type: number
+          minimum: 0
+          maximum: 1
+      required: [type, noul]
+      additionalProperties: false
+    ChoiceAnswer:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [choice]
+        choice:
+          type: string
+        probabilities:
+          type: object
+          additionalProperties:
+            type: number
+            minimum: 0
+            maximum: 1
+        confidence:
+          type: number
+          minimum: 0
+          maximum: 1
+      required: [type, choice, probabilities, confidence]
+      additionalProperties: false
+    ScoreAnswer:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [score]
+        score:
+          type: number
+          minimum: 0
+          maximum: 9
+        probabilities:
+          type: object
+          additionalProperties:
+            type: number
+            minimum: 0
+            maximum: 1
+        confidence:
+          type: number
+          minimum: 0
+          maximum: 1
+        legend:
+          type: object
+          additionalProperties: true
+      required: [type, score, probabilities, confidence, legend]
+      additionalProperties: false
+    EvaluationResponse:
+      type: object
+      properties:
+        model:
+          type: string
+        answers:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/EvaluationAnswer"
+        usage:
+          $ref: "#/components/schemas/Usage"
+      required: [model, answers, usage]
       additionalProperties: false
     LLMResponse:
       type: object

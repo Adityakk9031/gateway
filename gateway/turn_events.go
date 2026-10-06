@@ -236,7 +236,7 @@ var turnEventVocabulary = map[string]turnEventSchema{
 		turnScoped: true,
 		fields: map[string]turnEventField{
 			"mono_ms":    nonNegativeIntegerField(true),
-			"kind":       enumerationField("stt", "tts", "llm"),
+			"kind":       enumerationField("stt", "tts", "llm", "evaluation"),
 			"session_id": tokenField(false, maxTurnEventIdentifierBytes),
 			"attempt_id": tokenField(false, maxTurnEventIdentifierBytes),
 			"request_id": tokenField(false, maxTurnEventIdentifierBytes),
@@ -248,7 +248,8 @@ var turnEventVocabulary = map[string]turnEventSchema{
 }
 
 // verifyLegAttachment enforces that leg identifiers match the leg's identity
-// namespace: STT/TTS legs are gateway sessions, LLM legs are relay requests.
+// namespace: STT/TTS legs are gateway sessions, hosted Router legs are relay
+// requests.
 // Mixing them would let one namespace masquerade as another in the assembler.
 func verifyLegAttachment(fields map[string]json.RawMessage) error {
 	var kind string
@@ -261,9 +262,9 @@ func verifyLegAttachment(fields map[string]json.RawMessage) error {
 		if !hasSessionID || !hasAttemptID || hasRequestID {
 			return errors.New("stt and tts legs require session_id and attempt_id and no request_id")
 		}
-	case "llm":
+	case "llm", "evaluation":
 		if !hasRequestID || hasSessionID || hasAttemptID {
-			return errors.New("llm legs require request_id and no session_id or attempt_id")
+			return errors.New("hosted router legs require request_id and no session_id or attempt_id")
 		}
 	}
 	return nil

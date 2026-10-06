@@ -29,6 +29,35 @@ func TestGoldenFixturesRoundTrip(t *testing.T) {
 	assertGolden[relayapi.LLMRequest](t, "llm-request-tools.json")
 	assertGolden[relayapi.LLMRequest](t, "llm-request-structured.json")
 	assertGolden[relayapi.LLMResponse](t, "llm-response.json")
+	assertGolden[relayapi.EvaluationRequest](t, "evaluation-request.json")
+	assertGoldenEvaluationResponse(t)
+	assertGoldenFrame[relayapi.LiveSessionStart](t, "ws-live-messages.json", 0)
+}
+
+func assertGoldenEvaluationResponse(t *testing.T) {
+	t.Helper()
+	var request relayapi.EvaluationRequest
+	var response relayapi.EvaluationResponse
+	decodeFixture(t, "evaluation-request.json", &request)
+	decodeFixture(t, "evaluation-response.json", &response)
+	if err := response.ValidateFor(request); err != nil {
+		t.Fatalf("evaluation-response.json: must validate: %v", err)
+	}
+	assertStableBytes(t, "evaluation-response.json", readFixture(t, "evaluation-response.json"), response)
+}
+
+// assertGoldenFrame pins one frame of a WebSocket fixture the same way the
+// HTTP fixtures are pinned: decode, validate, and re-marshal byte-for-byte.
+func assertGoldenFrame[T interface{ Validate() error }](t *testing.T, name string, index int) {
+	t.Helper()
+	var frames []json.RawMessage
+	if err := json.Unmarshal(readFixture(t, name), &frames); err != nil {
+		t.Fatalf("%s: decode frames: %v", name, err)
+	}
+	if index >= len(frames) {
+		t.Fatalf("%s: no frame %d", name, index)
+	}
+	assertGoldenValue[T](t, name, frames[index])
 }
 
 func assertGolden[T interface{ Validate() error }](t *testing.T, name string) {

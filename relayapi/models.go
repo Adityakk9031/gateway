@@ -6,21 +6,28 @@ import (
 	"strings"
 )
 
-// Kind selects the provider-neutral operation served by the relay. The set
-// is deliberately smaller than the local gateway's session kinds: the relay
-// serves stt, tts, and llm, and has no realtime kind.
+// Kind selects the provider-neutral operation served by the relay: stt, tts,
+// llm, and s2s. Speech-to-speech rows are served on protocol-specific public
+// routes (Model.Endpoint) speaking the vendor's native event protocol
+// (Model.Protocol) rather than a Router-neutral envelope.
 type Kind string
 
 const (
-	KindSTT Kind = "stt"
-	KindTTS Kind = "tts"
-	KindLLM Kind = "llm"
+	KindSTT        Kind = "stt"
+	KindTTS        Kind = "tts"
+	KindLLM        Kind = "llm"
+	KindS2S        Kind = "s2s"
+	KindEvaluation Kind = "evaluation"
 )
 
 // ModelCapabilities advertises what a model supports. Capability gating
 // happens before admission: a request using a capability a model does not
 // advertise is rejected with capability_unsupported, never silently stripped.
 type ModelCapabilities struct {
+	// Streaming says the model supports its kind's public streaming operation:
+	// live audio processing for STT, incremental text/audio sessions for TTS,
+	// streamed output for LLM, and bidirectional realtime audio for S2S.
+	Streaming        bool `json:"streaming"`
 	Tools            bool `json:"tools"`
 	StructuredOutput bool `json:"structured_output"`
 	CachedInput      bool `json:"cached_input"`
@@ -28,6 +35,11 @@ type ModelCapabilities struct {
 	Diarization      bool `json:"diarization"`
 	Keywords         bool `json:"keywords"`
 	NoiseReduction   bool `json:"noise_reduction"`
+	// WordTimestamps says whether an STT model can be ASKED for per-word
+	// start/end timings on the batch transcription result
+	// (STTOptions.WordTimestamps → TranscriptionResponse.Words). Distinct
+	// from WordTimings, which describes what a TTS route emits unasked.
+	WordTimestamps bool `json:"word_timestamps"`
 	// WordTimings and CharacterTimings say whether a TTS model reports
 	// time-aligned speech spans, and at which granularity it MEASURES them.
 	// They are separate bits rather than one enum because a model may report
@@ -35,6 +47,12 @@ type ModelCapabilities struct {
 	// characters into words on the caller's behalf.
 	WordTimings      bool `json:"word_timings"`
 	CharacterTimings bool `json:"character_timings"`
+	// Translation says the model translates: speech in, speech in another
+	// language out (S2S), or speech in, translated text out (STT). A model
+	// with this bit set is a translation model, not a conversational one:
+	// its route carries a target language and returns no assistant turn.
+	Translation             bool     `json:"translation"`
+	EvaluationQuestionTypes []string `json:"evaluation_question_types,omitempty"`
 }
 
 // SampleRateRange is an inclusive set of sample rates accepted by one audio
@@ -154,6 +172,10 @@ func (c ModelCapabilities) SupportsSTTOptions(options *STTOptions) (string, bool
 		return "keywords", false
 	case options.ReduceNoise() && !c.NoiseReduction:
 		return "noise_reduction", false
+	case options.WantsWordTimestamps() && !c.WordTimestamps:
+		return "word_timestamps", false
+	case options.TranslationTarget() != "" && !c.Translation:
+		return "translation", false
 	default:
 		return "", true
 	}
@@ -163,14 +185,32 @@ func (c ModelCapabilities) SupportsSTTOptions(options *STTOptions) (string, bool
 // Speko Router regions (AWS region ids) where the model is routable right
 // now — relay locations, never provider-processing residency.
 type Model struct {
-	ID               string            `json:"id"`
-	Provider         string            `json:"provider"`
-	Kind             Kind              `json:"kind"`
-	Capabilities     ModelCapabilities `json:"capabilities"`
-	Regions          []string          `json:"regions"`
-	AudioFormats     []AudioFormat     `json:"audio_formats,omitempty"`
-	BatchAudioLimits *BatchAudioLimits `json:"batch_audio_limits,omitempty"`
-	Benchmark        *ModelBenchmark   `json:"benchmark,omitempty"`
+	ID           string            `json:"id"`
+	Provider     string            `json:"provider"`
+	Kind         Kind              `json:"kind"`
+	Capabilities ModelCapabilities `json:"capabilities"`
+	Regions      []string          `json:"regions"`
+	// AudioFormats lists accepted input formats for STT and S2S models and
+	// output formats for TTS models.
+	AudioFormats []AudioFormat `json:"audio_formats,omitempty"`
+	// OutputAudioFormats lists the formats an S2S model speaks in; omitted
+	// for every other kind.
+	OutputAudioFormats []AudioFormat     `json:"output_audio_formats,omitempty"`
+	BatchAudioLimits   *BatchAudioLimits `json:"batch_audio_limits,omitempty"`
+	// Endpoint is the public Router route an S2S model is served on
+	// (/v1/realtime, /v1/live, /v1/bidi, /v1/realtime/translations, or
+	// /v1/realtime/translations/qwen); multiple native protocols may share a
+	// route and are disambiguated by the exact model id. Omitted for every other kind,
+	// whose routes are fixed per kind.
+	Endpoint string `json:"endpoint,omitempty"`
+	// Protocol names the native event protocol an S2S route speaks
+	// (openai.realtime.v1, xai.realtime.v1, openai.live.v1, google.live.v1,
+	// openai.realtime.translation.v1, alibaba.livetranslate.v1); omitted for
+	// every other kind. It also tells a client how to FRAME its messages:
+	// OpenAI, xAI, GPT-Live and both translation protocols tag by "type";
+	// google.live.v1 uses a top-level key.
+	Protocol  string          `json:"protocol,omitempty"`
+	Benchmark *ModelBenchmark `json:"benchmark,omitempty"`
 }
 
 // Validate checks that a catalog entry is concrete and routable somewhere.
@@ -189,15 +229,61 @@ func (m Model) Validate() error {
 			return fmt.Errorf("regions[%d]: region id must not be blank", i)
 		}
 	}
-	if m.Kind == KindLLM && len(m.AudioFormats) != 0 {
-		return fmt.Errorf("audio_formats: must be omitted for llm models")
+	if (m.Kind == KindLLM || m.Kind == KindEvaluation) && len(m.AudioFormats) != 0 {
+		return fmt.Errorf("audio_formats: must be omitted for non-speech models")
 	}
-	if (m.Kind == KindSTT || m.Kind == KindTTS) && len(m.AudioFormats) == 0 {
+	if (m.Kind == KindSTT || m.Kind == KindTTS || m.Kind == KindS2S) && len(m.AudioFormats) == 0 {
 		return fmt.Errorf("audio_formats: at least one format is required for speech models")
 	}
 	for i, format := range m.AudioFormats {
 		if err := format.Validate(); err != nil {
 			return fmt.Errorf("audio_formats[%d]: %w", i, err)
+		}
+	}
+	if m.Kind == KindS2S {
+		if len(m.OutputAudioFormats) == 0 {
+			return fmt.Errorf("output_audio_formats: at least one format is required for s2s models")
+		}
+		if m.Endpoint != RealtimeRoutePath && m.Endpoint != LiveRoutePath && m.Endpoint != BidiRoutePath && m.Endpoint != TranslationRoutePath && m.Endpoint != QwenTranslationRoutePath {
+			return fmt.Errorf("endpoint: s2s models are served on %s, %s, %s, %s or %s, got %q", RealtimeRoutePath, LiveRoutePath, BidiRoutePath, TranslationRoutePath, QwenTranslationRoutePath, m.Endpoint)
+		}
+		if strings.TrimSpace(m.Protocol) == "" || strings.ContainsAny(m.Protocol, " \t\r\n") {
+			return fmt.Errorf("protocol: required for s2s models")
+		}
+		if m.BatchAudioLimits != nil {
+			return fmt.Errorf("batch_audio_limits: must be omitted for s2s models")
+		}
+	} else {
+		if len(m.OutputAudioFormats) != 0 {
+			return fmt.Errorf("output_audio_formats: valid only for s2s models")
+		}
+		if m.Endpoint != "" || m.Protocol != "" {
+			return fmt.Errorf("endpoint and protocol: valid only for s2s models")
+		}
+	}
+	if m.Kind == KindEvaluation {
+		if m.Capabilities.Streaming {
+			return fmt.Errorf("streaming: evaluation models are non-streaming")
+		}
+		if len(m.Capabilities.EvaluationQuestionTypes) == 0 {
+			return fmt.Errorf("evaluation_question_types: required for evaluation models")
+		}
+		seenQuestionTypes := make(map[string]struct{}, len(m.Capabilities.EvaluationQuestionTypes))
+		for _, questionType := range m.Capabilities.EvaluationQuestionTypes {
+			if questionType != EvaluationQuestionChoice && questionType != EvaluationQuestionScore && questionType != EvaluationQuestionNoul {
+				return fmt.Errorf("evaluation_question_types: unsupported value %q", questionType)
+			}
+			if _, duplicate := seenQuestionTypes[questionType]; duplicate {
+				return fmt.Errorf("evaluation_question_types: duplicate value %q", questionType)
+			}
+			seenQuestionTypes[questionType] = struct{}{}
+		}
+	} else if len(m.Capabilities.EvaluationQuestionTypes) != 0 {
+		return fmt.Errorf("evaluation_question_types: valid only for evaluation models")
+	}
+	for i, format := range m.OutputAudioFormats {
+		if err := format.Validate(); err != nil {
+			return fmt.Errorf("output_audio_formats[%d]: %w", i, err)
 		}
 	}
 	return nil
@@ -227,5 +313,5 @@ func (m ModelsResponse) Validate() error {
 }
 
 func validKind(v Kind) bool {
-	return v == KindSTT || v == KindTTS || v == KindLLM
+	return v == KindSTT || v == KindTTS || v == KindLLM || v == KindS2S || v == KindEvaluation
 }

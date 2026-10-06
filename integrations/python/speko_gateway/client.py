@@ -14,6 +14,8 @@ from typing import Any
 
 import aiohttp
 
+from ._user_agent import USER_AGENT
+
 _SUBPROTOCOL = "speko.voice.v0.r3"
 _BASE_URL = "http://speko-gateway"
 _DEFAULT_SOCKET_PATH = "/run/speko/runtime.sock"
@@ -78,7 +80,10 @@ class GatewayClient:
     def __init__(self, *, socket_path: str, local_auth_token: str) -> None:
         if not socket_path or not local_auth_token:
             raise ValueError("socket_path and local_auth_token are required")
-        self._headers = {"Authorization": f"Bearer {local_auth_token}"}
+        self._headers = {
+            "Authorization": f"Bearer {local_auth_token}",
+            "User-Agent": USER_AGENT,
+        }
         self._session = aiohttp.ClientSession(
             connector=aiohttp.UnixConnector(path=socket_path),
             headers=self._headers,
@@ -159,7 +164,18 @@ class GatewayClient:
         ) as response:
             body = await _decode_json(response)
         if response.status not in (200, 201):
-            raise GatewayError(_error_message(response.status, body))
+            error = body.get("error")
+            error = error if isinstance(error, dict) else {}
+            # Admission denials cannot recover by replaying the same request.
+            retryable = response.status in (408, 429) or response.status >= 500
+            if retryable and isinstance(error.get("retryable"), bool):
+                retryable = error["retryable"]
+            raise GatewayError(
+                _error_message(response.status, body),
+                code=error.get("code", "") if isinstance(error.get("code"), str) else "",
+                source=error.get("source", "") if isinstance(error.get("source"), str) else "",
+                retryable=retryable,
+            )
         stream_url = body.get("stream_url")
         if not isinstance(stream_url, str) or not stream_url.startswith(
             "/v1/sessions/"
@@ -273,7 +289,13 @@ async def _decode_json(response: aiohttp.ClientResponse) -> dict[str, Any]:
 def _error_message(status: int, body: dict[str, Any]) -> str:
     error = body.get("error")
     if isinstance(error, dict) and isinstance(error.get("code"), str):
-        return f"Gateway rejected request ({error['code']}, HTTP {status})"
+        detail = f"{error['code']}, HTTP {status}"
+        provider = error.get("provider")
+        if isinstance(provider, dict) and isinstance(provider.get("code"), str):
+            detail += f", provider {provider['code']}"
+            if type(provider.get("status")) is int and provider["status"]:
+                detail += f" HTTP {provider['status']}"
+        return f"Gateway rejected request ({detail})"
     return f"Gateway rejected request (HTTP {status})"
 
 

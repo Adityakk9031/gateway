@@ -1,10 +1,64 @@
 package relayapi_test
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/SpekoAI/gateway/relayapi"
 )
+
+func TestModelCapabilitiesMissingStreamingDefaultsFalse(t *testing.T) {
+	t.Parallel()
+	var capabilities relayapi.ModelCapabilities
+	if err := json.Unmarshal([]byte(`{"tools":true}`), &capabilities); err != nil {
+		t.Fatal(err)
+	}
+	if capabilities.Streaming {
+		t.Fatal("an older response without streaming must decode conservatively as false")
+	}
+}
+
+func TestModelCapabilitiesSerializesStreamingFalse(t *testing.T) {
+	t.Parallel()
+	payload, err := json.Marshal(relayapi.ModelCapabilities{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := fields["streaming"]; !ok || string(got) != "false" {
+		t.Fatalf("streaming field = %s, present=%v; want explicit false", got, ok)
+	}
+}
+
+func TestEvaluationModelRejectsUnknownOrDuplicateQuestionTypes(t *testing.T) {
+	t.Parallel()
+	model := relayapi.Model{
+		ID:       "typesafe:jev-1.13.0",
+		Provider: "typesafe",
+		Kind:     relayapi.KindEvaluation,
+		Capabilities: relayapi.ModelCapabilities{
+			EvaluationQuestionTypes: []string{
+				relayapi.EvaluationQuestionChoice,
+				relayapi.EvaluationQuestionScore,
+				relayapi.EvaluationQuestionNoul,
+			},
+		},
+		Regions: []string{"us-east-1"},
+	}
+	if err := model.Validate(); err != nil {
+		t.Fatalf("valid evaluation model: %v", err)
+	}
+	model.Capabilities.EvaluationQuestionTypes = []string{"bogus"}
+	assertInvalid(t, model.Validate(), "unsupported value")
+	model.Capabilities.EvaluationQuestionTypes = []string{
+		relayapi.EvaluationQuestionChoice,
+		relayapi.EvaluationQuestionChoice,
+	}
+	assertInvalid(t, model.Validate(), "duplicate value")
+}
 
 func TestModelsResponseRejectsEachRuleViolation(t *testing.T) {
 	t.Parallel()
@@ -32,6 +86,15 @@ func TestModelsResponseRejectsEachRuleViolation(t *testing.T) {
 		{"format without channels", func(r *relayapi.ModelsResponse) {
 			r.Models[1].AudioFormats[0].Channels = nil
 		}, "channels"},
+		{"s2s without output formats", func(r *relayapi.ModelsResponse) { r.Models[2].OutputAudioFormats = nil }, "output_audio_formats"},
+		{"s2s without endpoint", func(r *relayapi.ModelsResponse) { r.Models[2].Endpoint = "" }, "endpoint"},
+		{"s2s on a foreign route", func(r *relayapi.ModelsResponse) { r.Models[2].Endpoint = "/v1/stt/stream" }, "endpoint"},
+		{"s2s without protocol", func(r *relayapi.ModelsResponse) { r.Models[3].Protocol = "" }, "protocol"},
+		{"s2s with batch limits", func(r *relayapi.ModelsResponse) {
+			r.Models[3].BatchAudioLimits = &relayapi.BatchAudioLimits{MaxPCMBytes: 1}
+		}, "batch_audio_limits"},
+		{"stt with output formats", func(r *relayapi.ModelsResponse) { r.Models[1].OutputAudioFormats = r.Models[2].OutputAudioFormats }, "output_audio_formats: valid only"},
+		{"llm with endpoint", func(r *relayapi.ModelsResponse) { r.Models[0].Endpoint = "/v1/live" }, "endpoint and protocol"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -44,5 +107,26 @@ func TestModelsResponseRejectsEachRuleViolation(t *testing.T) {
 			tc.mutate(&response)
 			assertInvalid(t, response.Validate(), tc.want)
 		})
+	}
+}
+
+func TestModelsResponseAcceptsTheQwenTranslationRoute(t *testing.T) {
+	t.Parallel()
+	// A LiveTranslate row is an ordinary S2S row served on its own route and
+	// advertised as a translation model; the endpoint allowlist must name the
+	// route or /v1/models would fail its own contract the moment the row ships.
+	var response relayapi.ModelsResponse
+	decodeFixture(t, "models-response.json", &response)
+	model := response.Models[2]
+	if model.Kind != relayapi.KindS2S {
+		t.Fatalf("fixture models[2] kind = %q, want s2s", model.Kind)
+	}
+	model.ID = "qwen3.8-livetranslate-flash-realtime"
+	model.Provider = "alibaba"
+	model.Endpoint = relayapi.QwenTranslationRoutePath
+	model.Protocol = "alibaba.livetranslate.v1"
+	model.Capabilities.Translation = true
+	if err := model.Validate(); err != nil {
+		t.Fatalf("translation route row must validate: %v", err)
 	}
 }

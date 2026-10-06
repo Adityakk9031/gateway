@@ -1,10 +1,10 @@
 # Use Speko Gateway with Pipecat
 
 This guide adds Speko Gateway as a sidecar inside a current Pipecat cascade
-agent. The native integration implements Pipecat's streaming `STTService` and
-`TTSService` contracts, so the rest of the pipeline—including transports, VAD,
-turn aggregation, LLMs, tools, metrics, and Pipecat Cloud—continues to work in
-the normal Pipecat way.
+agent. The native integration implements Pipecat's streaming `STTService`,
+`LLMService`, and `TTSService` contracts. Voice audio goes from Gateway to the
+selected speech providers; `SpekoLLMService` sends conversation text to Speko
+Router.
 
 The supported package range is `pipecat-ai>=1.7,<2` on Python 3.11 or newer.
 The examples below follow the project produced by the current
@@ -13,16 +13,15 @@ The examples below follow the project produced by the current
 [community service contracts](https://github.com/pipecat-ai/pipecat/blob/main/COMMUNITY_INTEGRATIONS.md)
 rather than emulating a provider-specific SDK.
 
-## 1. Replace the voice services
+## 1. Replace the model services
 
-Keep the LLM and the rest of the generated pipeline unchanged. In `bot.py`,
-replace the provider-specific STT and TTS imports:
+In `bot.py`, replace the provider-specific model imports:
 
 ```diff
 -from pipecat.services.cartesia.tts import CartesiaTTSService
 -from pipecat.services.deepgram.stt import DeepgramSTTService
- from pipecat.services.openai.llm import OpenAILLMService
-+from speko_gateway.pipecat import SpekoSTTService, SpekoTTSService
+-from pipecat.services.openai.llm import OpenAILLMService
++from speko_gateway.pipecat import SpekoLLMService, SpekoSTTService, SpekoTTSService
 ```
 
 Then replace their construction inside `run_bot`:
@@ -41,6 +40,11 @@ Then replace their construction inside `run_bot`:
 +    model="auto",
 +    credential_source="auto",  # or "byok" / "managed"
 +)
++llm = SpekoLLMService(
++    provider="auto",
++    model="auto",
++    session_id=platform_session_id,
++)
 +tts = SpekoTTSService(
 +    language="en",
 +    provider="auto",
@@ -58,7 +62,7 @@ pipeline = Pipeline(
         transport.input(),
         stt,
         user_aggregator,
-        llm,                      # any Pipecat LLM service
+        llm,
         tts,
         transport.output(),
         assistant_aggregator,
@@ -69,18 +73,22 @@ pipeline = Pipeline(
 Keep the generated `SileroVADAnalyzer` on the user aggregator (or another
 Pipecat VAD that emits `VADUserStoppedSpeakingFrame`). The Speko STT service
 uses that frame to commit each utterance before Pipecat's turn aggregator waits
-for the final transcript. TTS commits each aggregated sentence immediately,
-keeps one Gateway session for the whole bot turn, and maps Pipecat interruption
-events to Gateway cancellation for barge-in.
+for the final transcript. TTS commits the first aggregated sentence immediately
+and waits for Gateway's `audio.done` before submitting the next sentence, while
+audio streams to Pipecat on the receiver task. It keeps one Gateway session for
+the whole bot turn and maps Pipecat interruption events to Gateway cancellation
+for barge-in. Interruption or stream termination also releases a waiting sentence.
 
 Pipecat supplies the pipeline input and output sample rates at startup, so you
 normally should not set `sample_rate`. If a custom transport forces a specific
 format, both services accept `sample_rate=` and `num_channels=`; Gateway audio
 is signed 16-bit little-endian PCM.
 
-Your existing Pipecat LLM stays unchanged. For example,
-`OpenAILLMService` still sends prompts directly to OpenAI; the local Gateway
-sidecar only receives the STT audio and TTS text used by these two processors.
+`SpekoLLMService` supports streaming text, function calls and results, context
+and tool updates, cancellation, usage metrics, and out-of-band
+`run_inference`. Pass `session_id` to all three services to correlate each
+request and provider attempt with the Platform conversation while preserving
+their separate request identifiers.
 
 ## 2. Add the sidecar to the Pipecat image
 
@@ -144,7 +152,6 @@ Managed routing and billing:
 ```dotenv
 SPEKO_LOCAL_AUTH_TOKEN=replace-with-generated-token
 SPEKO_API_KEY=replace-with-speko-api-key
-OPENAI_API_KEY=replace-with-openai-key
 ```
 
 Provider-direct BYOK (example):
@@ -153,7 +160,6 @@ Provider-direct BYOK (example):
 SPEKO_LOCAL_AUTH_TOKEN=replace-with-generated-token
 SPEKO_DEEPGRAM_BYOK_API_KEY=replace-with-deepgram-key
 SPEKO_CARTESIA_BYOK_API_KEY=replace-with-cartesia-key
-OPENAI_API_KEY=replace-with-openai-key
 ```
 
 `credential_source="auto"` selects managed voice routing when `SPEKO_API_KEY`
@@ -180,17 +186,9 @@ Open `http://localhost:7860`, connect, and verify the first turn before
 deploying. The adapter reports standard Pipecat transcription, TTS audio,
 usage, TTFB, and TTFA frames, so existing Pipecat observers continue to work.
 
-For Pipecat Cloud, make sure `secret_set` in `pcc-deploy.toml` names the set you
-upload, then use the normal CLI flow:
-
-```bash
-pipecat cloud secrets set YOUR_SECRET_SET --file .env
-pipecat cloud deploy
-```
-
-[Pipecat Cloud builds Linux/ARM64 images](https://docs.pipecat.ai/pipecat-cloud/fundamentals/agent-images).
-The public Gateway image is multi-platform, so the same Dockerfile works
-locally and in the cloud.
+Speko managed agents run this image on Speko's container infrastructure. The
+same integration may be used in customer-owned Pipecat deployments, but Speko
+does not host managed sessions on Pipecat Cloud.
 
 ## Options and routing
 
@@ -212,6 +210,16 @@ stt = SpekoSTTService(
 Options fail closed when the chosen provider cannot honor them. Pin both
 `provider` and `model` when an option is a hard requirement; with `auto`, the
 router is otherwise free to choose another compatible catalog route.
+
+Managed deployments can opt into availability-first routing with
+`fallback_to_auto_on_no_eligible_route=True` on `SpekoSTTService` and
+`SpekoTTSService`. When an explicit provider/model is rejected with
+`no_eligible_route`, the service retries once with automatic provider and model
+selection. This applies to `credential_source="managed"` and to
+`credential_source="auto"` when it resolves to managed routing. TTS omits the
+configured voice on fallback because voices are provider-specific, and later
+contexts on the same TTS service continue using automatic routing. The option
+is disabled by default and never changes BYOK or other error handling.
 
 Each STT pipeline gets one long-lived Gateway stream. Each TTS bot turn gets a
 fresh stream, allowing the route to be selected per response and ensuring a

@@ -91,13 +91,14 @@ func TestTTSSessionEmitsBinaryAudioWithoutProviderLogicInEngine(t *testing.T) {
 	}
 }
 
-func TestTTSSessionEnforcesFixedUnicodeCharacterAllowance(t *testing.T) {
+func TestManagedPalabraTTSSessionReportsUnicodeCharacters(t *testing.T) {
 	t.Parallel()
 
-	adapter := mock.NewTTSAdapter("mock.limited.tts")
+	adapter := mock.NewTTSAdapter("palabra.tts.v1")
 	telemetry := &collectingTelemetry{}
 	engine := newEngine(t, adapter, runtimepkg.DefaultLimits(), telemetry)
 	plan := validPlan(protocol.SessionKindTTS, adapter.ID(), 60)
+	plan.Route.Provider = "palabra"
 	plan.Reservation.Usage.AuthorizedUnits = 3
 	plan.Execution.CredentialSource = protocol.CredentialsManaged
 	plan.Route.Credential = &protocol.DelegatedCredential{Kind: protocol.CredentialBearer, Value: "short-lived", ExpiresAt: fixedNow.Add(time.Minute)}
@@ -119,15 +120,18 @@ func TestTTSSessionEnforcesFixedUnicodeCharacterAllowance(t *testing.T) {
 	}
 	session.Close()
 	collectEvents(t, session)
-	assertUsageReported(t, telemetry.snapshot(), protocol.UsageUnitCharacters, 3_000, true)
+	recorded := telemetry.snapshot()
+	assertUsageReported(t, recorded, protocol.UsageUnitCharacters, 3_000, true)
+	assertAuthenticatedUsageDestination(t, recorded)
 }
 
-func TestSTTSessionReportsAcceptedPCMDurationFromCompleteSamples(t *testing.T) {
+func TestManagedPalabraSTTSessionReportsAcceptedPCMDuration(t *testing.T) {
 	t.Parallel()
-	adapter := mock.NewSTTAdapter("mock.usage-duration.stt")
+	adapter := mock.NewSTTAdapter("palabra.stt.v1")
 	telemetry := &collectingTelemetry{}
 	engine := newEngine(t, adapter, runtimepkg.DefaultLimits(), telemetry)
 	plan := validPlan(protocol.SessionKindSTT, adapter.ID(), 60)
+	plan.Route.Provider = "palabra"
 	plan.Execution.CredentialSource = protocol.CredentialsManaged
 	plan.Route.Credential = &protocol.DelegatedCredential{Kind: protocol.CredentialBearer, Value: "short-lived", ExpiresAt: fixedNow.Add(time.Minute)}
 	session, err := engine.Open(context.Background(), runtimepkg.OpenRequest{
@@ -142,7 +146,9 @@ func TestSTTSessionReportsAcceptedPCMDurationFromCompleteSamples(t *testing.T) {
 	}
 	session.Close()
 	collectEvents(t, session)
-	assertUsageReported(t, telemetry.snapshot(), protocol.UsageUnitDurationSeconds, 1_000, true)
+	recorded := telemetry.snapshot()
+	assertUsageReported(t, recorded, protocol.UsageUnitDurationSeconds, 1_000, true)
+	assertAuthenticatedUsageDestination(t, recorded)
 }
 
 func TestEngineInjectsBYOKCredentialOnlyIntoAdapterRequest(t *testing.T) {
@@ -644,6 +650,19 @@ func assertUsageReported(t *testing.T, events []runtimepkg.TelemetryEvent, unit 
 	}
 }
 
+func assertAuthenticatedUsageDestination(t *testing.T, events []runtimepkg.TelemetryEvent) {
+	t.Helper()
+	for _, event := range events {
+		if event.Name == "usage.reported" {
+			if event.Destination.Endpoint == "" || event.Destination.Token == "" {
+				t.Fatalf("managed usage destination = %+v, want authenticated endpoint", event.Destination)
+			}
+			return
+		}
+	}
+	t.Fatal("usage.reported event not found")
+}
+
 type collectingTelemetry struct {
 	mu     sync.Mutex
 	events []runtimepkg.TelemetryEvent
@@ -829,4 +848,27 @@ func TestEngineFallsBackToThePlanVoiceOnlyWhenTheCallerSentNone(t *testing.T) {
 	if got := open(protocol.RequestOptions{Voice: "caller-chosen-voice"}).Voice; got != "caller-chosen-voice" {
 		t.Fatalf("adapter voice = %q, want the caller's override to win", got)
 	}
+}
+
+func TestInternalBillingEvidenceDoesNotChangePublicEvents(t *testing.T) {
+	adapter := mock.NewAdapter("mock.billing", func(_ runtimepkg.AdapterRequest) *mock.Stream {
+		stream := mock.NewStream(8)
+		stream.CommitTextHook = func(context.Context) error {
+			if err := stream.Emit(runtimepkg.ProviderEvent{Type: protocol.EventUsageObserved, Billing: &protocol.BillingObservation{OperationID: "internal", Model: "model", Mode: "streaming", Quantities: map[string]int64{}}}); err != nil {
+				return err
+			}
+			return stream.Emit(runtimepkg.ProviderEvent{Type: protocol.EventAudioDone})
+		}
+		return stream
+	})
+	engine := newEngine(t, adapter, runtimepkg.DefaultLimits(), runtimepkg.NopTelemetry{})
+	session := openSession(t, engine, protocol.SessionKindTTS, adapter.ID())
+	if err := session.AppendText("hello"); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.CommitText(); err != nil {
+		t.Fatal(err)
+	}
+	session.Close()
+	assertTypes(t, collectEvents(t, session), []protocol.EventType{protocol.EventSessionReady, protocol.EventAudioDone, protocol.EventSessionClosed})
 }

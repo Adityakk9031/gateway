@@ -96,6 +96,12 @@ func TestTranscriptionResponseValidation(t *testing.T) {
 		{"negative segment start", func(r *relayapi.TranscriptionResponse) { r.Segments[0].StartMS = -1 }, "segments[0]"},
 		{"segment ends before start", func(r *relayapi.TranscriptionResponse) { r.Segments[0].EndMS = r.Segments[0].StartMS - 1 }, "segments[0]"},
 		{"incomplete route", func(r *relayapi.TranscriptionResponse) { r.Route.AttemptID = "" }, "route:"},
+		{"word ends before start", func(r *relayapi.TranscriptionResponse) {
+			r.Words = []relayapi.TranscriptWord{{Text: "hello", StartMS: 500, EndMS: 400}}
+		}, "words[0]"},
+		{"blank word", func(r *relayapi.TranscriptionResponse) {
+			r.Words = []relayapi.TranscriptWord{{Text: " ", StartMS: 0, EndMS: 400}}
+		}, "words[0]"},
 		{"negative usage", func(r *relayapi.TranscriptionResponse) { r.Usage.DurationMS = -1 }, "must not be negative"},
 	}
 	for _, tc := range cases {
@@ -122,6 +128,12 @@ func TestSTTStreamMessageValidation(t *testing.T) {
 	}
 	if err := configure.Validate(); err != nil {
 		t.Fatalf("valid configure must validate: %v", err)
+	}
+
+	// On a translating session the translation trails the transcript, so a
+	// delta that advances only the translation is still something to say.
+	if err := (relayapi.STTTranscriptDelta{Type: relayapi.STTEventTranscriptDelta, Translation: "hola"}).Validate(); err != nil {
+		t.Fatalf("a translation-only delta must validate: %v", err)
 	}
 
 	cases := []struct {

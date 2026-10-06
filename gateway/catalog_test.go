@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -23,6 +24,7 @@ type catalogResponse struct {
 		Provider  string `json:"provider"`
 		Kind      string `json:"kind"`
 		Adapter   string `json:"adapter"`
+		Protocol  string `json:"protocol"`
 		Transport string `json:"transport"`
 		Installed bool   `json:"installed"`
 	} `json:"models"`
@@ -85,16 +87,18 @@ func TestModelsPublishesEveryCatalogEntry(t *testing.T) {
 	if !found {
 		t.Fatal("catalog does not publish elevenlabs stt")
 	}
-	wantSimba := map[string]bool{
+	wantMultiModel := map[string]bool{
 		"speechify:simba-3.2": false, "speechify:simba-3.0": false,
 		"speechify:simba-multilingual": false, "speechify:simba-english": false,
+		"gemini:gemini-3.1-flash-tts-preview": false, "gemini:gemini-3.8-flash-tts": false,
+		"gemini:gemini-3.8-flash-lite-tts": false,
 	}
 	for _, model := range catalog.Models {
-		if _, ok := wantSimba[model.ID]; ok {
-			wantSimba[model.ID] = true
+		if _, ok := wantMultiModel[model.ID]; ok {
+			wantMultiModel[model.ID] = true
 		}
 	}
-	for id, present := range wantSimba {
+	for id, present := range wantMultiModel {
 		if !present {
 			t.Errorf("catalog does not publish %s", id)
 		}
@@ -139,6 +143,21 @@ func TestModelsFiltersByKindAndProvider(t *testing.T) {
 	elevenlabs := fetchCatalog(t, "/v1/models?provider=elevenlabs")
 	if len(elevenlabs.Models) != 2 {
 		t.Fatalf("provider=elevenlabs returned %d rows, want stt and tts", len(elevenlabs.Models))
+	}
+	// AssemblyAI serves two published Universal Pro models on one adapter;
+	// both must be discoverable, with the default still resolving to 3.5 Pro.
+	assemblyai := fetchCatalog(t, "/v1/models?provider=assemblyai")
+	ids := make([]string, 0, len(assemblyai.Models))
+	for _, model := range assemblyai.Models {
+		ids = append(ids, model.ID)
+	}
+	if !slices.Contains(ids, "assemblyai:universal-3-5-pro") || !slices.Contains(ids, "assemblyai:universal-3-6-pro") {
+		t.Fatalf("provider=assemblyai returned %v, want both Universal Pro models", ids)
+	}
+	for _, entry := range gateway.Catalog() {
+		if entry.Provider == "assemblyai" && entry.DefaultModel != "universal-3-5-pro" {
+			t.Fatalf("assemblyai default = %q, want universal-3-5-pro", entry.DefaultModel)
+		}
 	}
 	if unknown := fetchCatalog(t, "/v1/models?provider=nope"); len(unknown.Models) != 0 {
 		t.Fatalf("an unknown provider returned %d rows, want none", len(unknown.Models))
@@ -211,6 +230,20 @@ func TestCatalogCarriesADefaultVoiceWhereTheVendorDemandsOne(t *testing.T) {
 	}
 }
 
+func TestMayaCatalogUsesCurrentCalyxDefaults(t *testing.T) {
+	t.Parallel()
+	for _, entry := range gateway.Catalog() {
+		if entry.Provider != "maya" || entry.Kind != protocol.SessionKindTTS {
+			continue
+		}
+		if entry.DefaultModel != "Maya Calyx" || entry.DefaultVoice != "Aarav" || len(entry.Models) != 0 {
+			t.Fatalf("Maya catalog entry = %+v, want the single Calyx model with Aarav", entry)
+		}
+		return
+	}
+	t.Fatal("Maya TTS catalog entry is missing")
+}
+
 // Greptile caught both of these on review, and both were real: a published route
 // that cannot possibly dial is worse than an absent one, because an integrator
 // wires the id and gets a vendor error instead of ours.
@@ -250,6 +283,33 @@ func TestEveryVoiceDemandingTTSHasADefaultOrAStatedReason(t *testing.T) {
 			if entry.DefaultVoice != "" {
 				t.Fatalf("google TTS carries default voice %q despite language-specific naming", entry.DefaultVoice)
 			}
+		}
+	}
+}
+
+// The native speech protocol must reach /v1/models discovery: gpt-live-1
+// advertises openai.live.v1 and the Realtime models openai.realtime.v1, so a
+// client can tell the two OpenAI voice protocols apart from discovery alone.
+func TestModelsDiscoveryCarriesSpeechProtocol(t *testing.T) {
+	t.Parallel()
+	catalog := fetchCatalog(t, "/v1/models")
+	want := map[string]string{
+		"openai:gpt-live-1":       "openai.live.v1",
+		"openai:gpt-realtime-2.1": "openai.realtime.v1",
+		"openai:gpt-realtime-2":   "openai.realtime.v1",
+	}
+	seen := map[string]string{}
+	for _, model := range catalog.Models {
+		if _, ok := want[model.ID]; ok {
+			seen[model.ID] = model.Protocol
+		}
+		if model.Kind != "realtime" && model.Protocol != "" {
+			t.Fatalf("%s (%s) carries a protocol %q", model.ID, model.Kind, model.Protocol)
+		}
+	}
+	for id, protocol := range want {
+		if seen[id] != protocol {
+			t.Fatalf("%s protocol = %q, want %q", id, seen[id], protocol)
 		}
 	}
 }

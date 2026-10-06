@@ -211,7 +211,44 @@ func buildSetup(model string, options protocol.RequestOptions) map[string]any {
 			setup["systemInstruction"] = map[string]any{"parts": []map[string]string{{"text": instructions}}}
 		}
 	}
+	if level := thinkingLevelFor(model, requestedThinkingLevel(options)); level != "" {
+		generation["thinkingConfig"] = map[string]any{"thinkingLevel": level}
+	}
 	return map[string]any{"setup": setup}
+}
+
+// defaultThinkingLevel is used when a model REQUIRES a level and the caller
+// named none. The floor the service accepts: a model that exists to deliberate
+// should still not spend the caller's first-audio latency unasked.
+const defaultThinkingLevel = "low"
+
+func requestedThinkingLevel(options protocol.RequestOptions) string {
+	if options.S2S == nil {
+		return ""
+	}
+	return strings.TrimSpace(strings.ToLower(options.S2S.ThinkingLevel))
+}
+
+// thinkingLevelFor answers what `generationConfig.thinkingConfig.thinkingLevel`
+// must be for THIS model — "" meaning the key is omitted entirely.
+//
+// The level is not a preference the caller wins. Verified against the live
+// service on 2026-09-16: a model whose id ends `-extended-thinking` closes the
+// socket 1007 "Thinking level must be specified for this model" when the key
+// is absent, and every other Live model closes 1007 "Thinking level is not
+// supported for this model" when it is present. So a caller's level is honored
+// only where the model takes one, and a required-but-unnamed level is filled
+// in rather than left to kill the session at setup. MINIMAL is refused by the
+// service even on the extended model, so it falls back to the default too.
+func thinkingLevelFor(model string, requested string) string {
+	if !strings.HasSuffix(strings.TrimPrefix(model, "models/"), "-extended-thinking") {
+		return ""
+	}
+	switch requested {
+	case "low", "medium", "high":
+		return requested
+	}
+	return defaultThinkingLevel
 }
 
 type liveStream struct {

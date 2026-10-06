@@ -1,0 +1,30 @@
+{
+  "routing": {
+    "mode": "explicit",
+    "provider": "typesafe",
+    "model": "jev-1.13.0"
+  },
+  "state": {
+    "transcript": "Can I speak to someone about my order?",
+    "locale": "en-US"
+  },
+  "questions": {
+    "frustration": {
+      "type": "score",
+      "instructions": {"task": "Rate frustration", "language": "en"},
+      "criteria": ["calm", {"label": "frustrated", "severity": 1}, "angry"]
+    },
+    "handoff_requested": {
+      "type": "noul",
+      "instructions": "Is the customer explicitly requesting a human?"
+    },
+    "intent": {
+      "type": "choice",
+      "instructions": "Classify the immediate intent.",
+      "criteria": {
+        "order_status": {"description": "Existing order status", "priority": 1},
+        "other": null
+      }
+    }
+  }
+}

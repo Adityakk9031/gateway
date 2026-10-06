@@ -1,0 +1,23 @@
+{
+  "model": "jev-1.13.0",
+  "answers": {
+    "frustration": {
+      "type": "score",
+      "score": 1.6,
+      "probabilities": {"0": 0.05, "1": 0.3, "2": 0.65},
+      "confidence": 0.78,
+      "legend": {"0": "calm", "1": {"label": "frustrated", "severity": 1}, "2": "angry"}
+    },
+    "handoff_requested": {
+      "type": "noul",
+      "noul": 0.92
+    },
+    "intent": {
+      "type": "choice",
+      "choice": "order_status",
+      "probabilities": {"order_status": 0.95, "other": 0.05},
+      "confidence": 0.91
+    }
+  },
+  "usage": {"input_tokens": 312, "output_tokens": 48}
+}

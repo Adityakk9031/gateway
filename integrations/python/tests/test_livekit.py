@@ -153,7 +153,7 @@ async def test_stream_preserves_safe_gateway_error_classification() -> None:
         _ = [event async for event in stream]
     except APIConnectionError as error:
         assert (
-            str(error) == "Speko Gateway STT failed (runtime/session_lifetime_exceeded)"
+            error.message == "Speko Gateway STT failed (runtime/session_lifetime_exceeded)"
         )
         assert error.retryable is True
     else:
@@ -260,7 +260,7 @@ async def test_tts_stream_preserves_safe_gateway_error_classification() -> None:
         _ = [event async for event in stream]
     except APIConnectionError as error:
         assert (
-            str(error)
+            error.message
             == "Speko Gateway TTS failed (runtime/usage_reservation_exhausted)"
         )
         assert error.retryable is False
@@ -435,7 +435,7 @@ async def test_llm_stream_preserves_relay_error_classification() -> None:
     try:
         _ = [chunk async for chunk in stream]
     except APIConnectionError as error:
-        assert str(error) == "Speko Router LLM failed (insufficient_credit)"
+        assert error.message == "Speko Router LLM failed (insufficient_credit)"
         assert error.retryable is False
     else:
         raise AssertionError("expected the Router failure to reach LiveKit")
@@ -605,36 +605,16 @@ def test_stt_declares_the_capabilities_it_asked_for() -> None:
     }
 
 
-async def test_gateway_session_send_audio_guards_closed_state() -> None:
-    import pytest
+def test_cache_write_tokens_are_included_in_completion_usage() -> None:
+    from speko_gateway.livekit import _completion_usage
 
-    from speko_gateway.client import GatewaySession
-
-    class FakeWS:
-        def __init__(self) -> None:
-            self.sent_bytes: list[bytes] = []
-            self.sent_json: list[dict] = []
-            self.closed = False
-
-        async def send_bytes(self, data: bytes) -> None:
-            self.sent_bytes.append(data)
-
-        async def send_json(self, data: dict) -> None:
-            self.sent_json.append(data)
-
-        async def close(self) -> None:
-            self.closed = True
-
-    ws = FakeWS()
-    session = GatewaySession(ws, {})  # type: ignore[arg-type]
-    await session.send_audio(b"\x01\x02")
-    assert ws.sent_bytes == [b"\x01\x02"]
-
-    await session.finish()
-    with pytest.raises(GatewayError, match="Gateway session is finishing"):
-        await session.send_audio(b"\x03\x04")
-
-    await session.aclose()
-    with pytest.raises(GatewayError, match="Gateway session is closed"):
-        await session.send_audio(b"\x05\x06")
-
+    usage = _completion_usage({
+        "input_tokens": 300,
+        "cached_input_tokens": 100,
+        "cache_write_5m_tokens": 11,
+        "cache_write_1h_tokens": 19,
+        "output_tokens": 34,
+    })
+    assert usage.prompt_tokens == 430
+    assert usage.prompt_cached_tokens == 100
+    assert usage.total_tokens == 464

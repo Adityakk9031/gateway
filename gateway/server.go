@@ -157,11 +157,20 @@ type idempotencyRecord struct {
 }
 
 type createOutcome struct {
-	response  createResponse
-	status    int
-	code      string
-	message   string
-	requestID string
+	response      createResponse
+	status        int
+	code          string
+	message       string
+	requestID     string
+	providerError *providerOpenError
+}
+
+// Only classified fields cross the local API boundary; causes and provider
+// payloads may contain credentials or user content.
+type providerOpenError struct {
+	Code      string `json:"code"`
+	Status    int    `json:"status,omitempty"`
+	Retryable bool   `json:"retryable"`
 }
 
 // CreateSessionRequest contains caller-selectable, provider-neutral data.
@@ -420,6 +429,12 @@ func (s *Server) createSession(writer http.ResponseWriter, request *http.Request
 			writeError(writer, http.StatusBadRequest, "invalid_realtime_options", err.Error())
 			return
 		}
+		if body.Request.S2S.Live != nil {
+			if err := body.Request.S2S.Live.Validate(); err != nil {
+				writeError(writer, http.StatusBadRequest, "invalid_realtime_options", "live: "+err.Error())
+				return
+			}
+		}
 	} else if body.Kind == protocol.SessionKindRealtime {
 		writeError(writer, http.StatusBadRequest, "invalid_realtime_options", "s2s options are required for realtime sessions")
 		return
@@ -479,7 +494,11 @@ func (s *Server) createSession(writer http.ResponseWriter, request *http.Request
 	}
 	session, plan, requestID, err := s.openWithFallback(setupCtx, body, plan, requestID, idempotencyKey)
 	if err != nil {
-		outcome := createOutcome{status: http.StatusBadGateway, code: "session_open_failed", message: "provider session could not be opened"}
+		outcome := createOutcome{status: http.StatusBadGateway, code: "session_open_failed", message: "provider session could not be opened", requestID: requestID}
+		var providerError *runtimepkg.ProviderError
+		if errors.As(err, &providerError) {
+			outcome.providerError = &providerOpenError{Code: providerError.Code, Status: providerError.ProviderStatus, Retryable: providerError.Retryable}
+		}
 		// A refused STT ask is the caller's to fix, not a provider outage:
 		// answer 422 with the option named instead of a generic bad-gateway.
 		var supportError *SttSupportError
@@ -766,12 +785,12 @@ func (s *Server) releaseSessionAttachment(id string, session *runtimepkg.Session
 				s.expireUnattached(id, session)
 			})
 		} else {
-			expired = session
+			expired, _ = s.detachSessionLocked(id, session)
 		}
 	}
 	s.mu.Unlock()
 	if expired != nil {
-		expired.Close()
+		expired.Abort()
 	}
 }
 
@@ -879,7 +898,14 @@ func writeCreateOutcome(writer http.ResponseWriter, outcome createOutcome, repla
 		if outcome.requestID != "" {
 			writer.Header().Set("X-Control-Plane-Request-ID", outcome.requestID)
 		}
-		writeError(writer, outcome.status, outcome.code, outcome.message)
+		if outcome.providerError != nil {
+			writeJSON(writer, outcome.status, map[string]any{"error": map[string]any{
+				"code": outcome.code, "message": outcome.message, "source": "provider",
+				"retryable": outcome.providerError.Retryable, "provider": outcome.providerError,
+			}})
+		} else {
+			writeError(writer, outcome.status, outcome.code, outcome.message)
+		}
 		return
 	}
 	status := outcome.status
@@ -950,6 +976,19 @@ func readSessionInput(ctx context.Context, connection *websocket.Conn, session *
 			err = session.CommitText()
 		case "response.cancel":
 			err = session.Cancel()
+		case "provider.control":
+			// A bounded native provider command on a realtime session:
+			// {"type":"provider.control","data":{"type":"<native type>","payload":{...}}}.
+			// The runtime validates the envelope against the route's speech
+			// protocol; a refused control fails the command, not the session.
+			if len(command.Data) > protocol.MaxProviderControlBytes+1024 {
+				return errors.New("gateway: provider.control exceeds the control size bound")
+			}
+			var control protocol.ProviderControl
+			if json.Unmarshal(command.Data, &control) != nil {
+				return errors.New("gateway: provider.control requires data.type and data.payload")
+			}
+			err = session.SendProviderControl(control)
 		case "session.close":
 			session.Close()
 			return nil
