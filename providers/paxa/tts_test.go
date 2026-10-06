@@ -145,6 +145,43 @@ func TestCommitTextSendsTheDocumentedRequestAndStripsTheWAVHeader(t *testing.T) 
 	}
 }
 
+func TestIdleCancelKeepsTheStreamOpen(t *testing.T) {
+	pcm := []byte{1, 2, 3, 4}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "audio/wav")
+		_, _ = w.Write(append(wavHeader(24000, 1), pcm...))
+	}))
+	t.Cleanup(server.Close)
+	stream := openTTS(t, server, "en")
+	if err := stream.Cancel(context.Background()); err != nil {
+		t.Fatalf("idle cancellation closed a live session: %v", err)
+	}
+	if err := stream.AppendText(context.Background(), "next turn"); err != nil {
+		t.Fatalf("session unusable after idle cancel: %v", err)
+	}
+	if err := stream.CommitText(context.Background()); err != nil {
+		t.Fatalf("next turn commit: %v", err)
+	}
+	if audio := drain(t, stream); string(audio) != string(pcm) {
+		t.Fatalf("next turn audio=%v, want %v", audio, pcm)
+	}
+	if err := stream.Cancel(context.Background()); err != nil {
+		t.Fatalf("completed turn cancellation: %v", err)
+	}
+	if err := stream.AppendText(context.Background(), "discard this buffered turn"); err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.Cancel(context.Background()); err != nil {
+		t.Fatalf("buffered text cancellation: %v", err)
+	}
+	if err := stream.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.Cancel(context.Background()); !errors.Is(err, runtimepkg.ErrSessionClosed) {
+		t.Fatalf("closed session cancel=%v", err)
+	}
+}
+
 func TestLanguagePicksTheVoiceAndTheReadingLanguage(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
