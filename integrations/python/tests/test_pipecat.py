@@ -31,6 +31,7 @@ from pipecat.utils.asyncio.task_manager import TaskManager
 
 from speko_gateway.client import (
     CanonicalEvent,
+    GatewayError,
     SessionConfig,
 )
 from speko_gateway.pipecat import (
